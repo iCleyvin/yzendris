@@ -1,0 +1,28 @@
+/target
+/dist
+
+# personal AI context — not public
+CLAUDE.md
+/.vscode
+/.idea
+
+# generated TLS material (created on first run)
+**/cert.pem
+**/key.pem
+**/trusted_peers.txt
+
+# user configs (placed at runtime, never tracked)
+/server.toml
+/client.toml
+
+# logs
+*.log
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# build output stragglers
+*.pdb
+*.exp
+*.ilk

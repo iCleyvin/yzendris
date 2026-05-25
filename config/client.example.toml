@@ -1,0 +1,26 @@
+# yzendris — Linux client configuration
+# Copy to ~/.config/yzendris/client.toml
+
+# TCP port to listen on (server connects here).
+port = 7547
+
+# Bind address. "0.0.0.0" accepts from any interface; restrict to a specific
+# LAN IP if you want to be paranoid.
+bind_addr = "0.0.0.0"
+
+# XKB layout to assign to the virtual keyboard device.
+# Empty = auto-detect from `hyprctl devices -j` (first physical keyboard).
+kb_layout = ""
+
+# Milliseconds without a heartbeat before the client gives up on the server
+# and releases all held keys (avoids stuck modifiers if the server crashes).
+heartbeat_timeout_ms = 5000
+
+# Sync clipboard on capture transitions. Requires wl-clipboard on PATH.
+clipboard = true
+
+# TLS with SHA-256 fingerprint pinning. On first run with tls=true a
+# self-signed certificate is generated in ~/.config/yzendris/ and its
+# fingerprint is printed to stderr — paste it into the Windows server's
+# trusted_peers.txt to complete the pairing.
+tls = true

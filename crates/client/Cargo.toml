@@ -1,0 +1,25 @@
+[package]
+name    = "yzendris-client"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+yzendris-protocol   = { path = "../protocol" }
+tokio               = { workspace = true }
+serde               = { workspace = true }
+serde_json          = { workspace = true }
+bincode             = { workspace = true }
+toml                = { workspace = true }
+anyhow              = { workspace = true }
+tracing             = { workspace = true }
+tracing-subscriber  = { workspace = true }
+
+# evdev only exists on Linux — compile-guarded below
+[target.'cfg(target_os = "linux")'.dependencies]
+libc           = "0.2"
+evdev          = { version = "0.13" }
+rcgen          = { version = "0.13" }
+rustls         = { version = "0.23", features = ["ring"] }
+rustls-pemfile = "2"
+tokio-rustls   = { version = "0.26" }
+sha2           = "0.10"

@@ -1,0 +1,87 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install build deps (libudev, libinput for evdev/uinput)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libudev-dev pkg-config
+
+      - name: Build release binary
+        run: cargo build --release -p yzendris-client
+
+      - name: Stage artifact
+        run: |
+          mkdir -p dist
+          cp target/release/yzendris-client dist/
+          cp scripts/install-linux.sh dist/
+          cp config/client.example.toml dist/
+          cp LICENSE README.md dist/
+          tar -C dist -czf yzendris-linux-x86_64.tar.gz .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: yzendris-linux-x86_64
+          path: yzendris-linux-x86_64.tar.gz
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release binary
+        run: cargo build --release -p yzendris-server
+
+      - name: Stage artifact
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item target/release/yzendris-server.exe dist/
+          Copy-Item scripts/install-windows.ps1 dist/
+          Copy-Item config/server.example.toml dist/
+          Copy-Item LICENSE,README.md dist/
+          Compress-Archive -Path dist/* -DestinationPath yzendris-windows-x86_64.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: yzendris-windows-x86_64
+          path: yzendris-windows-x86_64.zip
+
+  release:
+    needs: [build-linux, build-windows]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/yzendris-linux-x86_64/yzendris-linux-x86_64.tar.gz
+            artifacts/yzendris-windows-x86_64/yzendris-windows-x86_64.zip
+          draft: true
+          generate_release_notes: true
