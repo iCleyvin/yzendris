@@ -1,0 +1,25 @@
+# yzendris — Windows server configuration
+# Copy to %APPDATA%\yzendris\server.toml and edit `client_addr` to your laptop's IP.
+
+# IP or hostname of the Linux client running yzendris-client.
+client_addr = "192.168.1.42"
+
+# TCP port the Linux client is listening on.
+port = 7547
+
+# Which screen edge triggers capture (cursor crosses → laptop takes over).
+# Options: "right" | "left" | "top" | "bottom"
+edge = "right"
+
+# Heartbeat interval in ms. Client disconnects if it stops receiving these.
+heartbeat_ms = 1000
+
+# Sync clipboard on capture transitions (server→client on CaptureStart,
+# client→server on CaptureEnd). Requires wl-clipboard on the Linux side.
+clipboard = true
+
+# TLS with SHA-256 fingerprint pinning. Strongly recommended on any LAN you
+# don't fully trust. The Linux client generates a self-signed cert on first run
+# and prints its fingerprint; paste that fingerprint into
+# %APPDATA%\yzendris\trusted_peers.txt (one per line).
+tls = true
