@@ -28,7 +28,7 @@ pub async fn run(
             }
             Ok(stream) => {
                 backoff_ms = 1000;
-                info!("connected to {addr}");
+                info!("TCP connected to {addr}");
 
                 let result = if let Some(ref connector) = tls_connector {
                     // Wrap in TLS.
@@ -40,11 +40,15 @@ pub async fn run(
                             Err(anyhow::anyhow!("TLS handshake: {e}"))
                         }
                         Ok(tls_stream) => {
+                            crate::hook::set_client_connected(true);
+                            info!("connected to {addr} (TLS OK)");
                             let (reader, writer) = tokio::io::split(tls_stream);
                             handle_generic(reader, writer, &mut event_rx, heartbeat_ms, clipboard_enabled).await
                         }
                     }
                 } else {
+                    crate::hook::set_client_connected(true);
+                    info!("connected to {addr}");
                     let (reader, writer) = tokio::io::split(stream);
                     handle_generic(reader, writer, &mut event_rx, heartbeat_ms, clipboard_enabled).await
                 };
@@ -53,11 +57,9 @@ pub async fn run(
                     error!("connection error: {e}");
                 }
 
-                // If still capturing, reset state and drain queue.
-                if crate::hook::CAPTURING.load(std::sync::atomic::Ordering::Relaxed) {
-                    crate::hook::CAPTURING.store(false, std::sync::atomic::Ordering::Relaxed);
-                    while event_rx.try_recv().is_ok() {}
-                }
+                crate::hook::set_client_connected(false);
+                crate::hook::release_capture_on_disconnect();
+                while event_rx.try_recv().is_ok() {}
                 warn!("disconnected — reconnecting in {backoff_ms}ms");
                 time::sleep(time::Duration::from_millis(backoff_ms)).await;
             }

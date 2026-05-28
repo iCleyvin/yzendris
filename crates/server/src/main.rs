@@ -136,7 +136,7 @@ async fn async_main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("yzendris_server=info".parse().unwrap()),
+                .add_directive("yzendris_server=debug".parse().unwrap()),
         )
         .init();
 

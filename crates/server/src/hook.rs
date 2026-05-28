@@ -41,6 +41,14 @@ static EVENT_TX: OnceLock<UnboundedSender<Event>> = OnceLock::new();
 /// Whether we are currently routing input to the Linux client.
 pub static CAPTURING: AtomicBool = AtomicBool::new(false);
 
+/// Whether a client TCP connection is currently live.
+/// Edge detection only triggers capture when this is true.
+pub static CLIENT_CONNECTED: AtomicBool = AtomicBool::new(false);
+
+pub fn set_client_connected(val: bool) {
+    CLIENT_CONNECTED.store(val, Ordering::Relaxed);
+}
+
 /// Win32 thread ID of the hook thread (used to post WM_QUIT for shutdown).
 static HOOK_THREAD_ID: AtomicU32 = AtomicU32::new(0);
 
@@ -126,6 +134,28 @@ pub fn configure_edge(trigger_coord: i32, side: u8) {
 /// Spawn the Win32 hook thread.  Returns immediately.
 pub fn start() {
     std::thread::spawn(hook_thread);
+}
+
+/// Called from the network layer when the TCP connection drops.
+/// Safely exits capture from any thread (ShowCursor / SetCursorPos are
+/// thread-safe Win32 calls).
+pub fn release_capture_on_disconnect() {
+    if !CAPTURING.load(Ordering::Relaxed) {
+        return;
+    }
+    held_keys_clear();
+    CAPTURING.store(false, Ordering::Relaxed);
+    CTRL_DOWN.store(false,  Ordering::Relaxed);
+    SHIFT_DOWN.store(false, Ordering::Relaxed);
+    ALT_DOWN.store(false,   Ordering::Relaxed);
+    #[cfg(windows)]
+    unsafe {
+        ShowCursor(windows::Win32::Foundation::BOOL(1));
+        let cx = CAPTURE_CENTER_X.load(Ordering::Relaxed);
+        let cy = CAPTURE_CENTER_Y.load(Ordering::Relaxed);
+        let _ = SetCursorPos(cx, cy);
+    }
+    warn!("capture released (client disconnected)");
 }
 
 /// Send WM_QUIT to the hook thread so it tears down and exits.
@@ -358,6 +388,7 @@ unsafe extern "system" fn ms_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> 
 
 #[cfg(windows)]
 unsafe fn check_edge_and_enter(x: i32, y: i32) {
+    let connected = CLIENT_CONNECTED.load(Ordering::Relaxed);
     let side      = EDGE_TRIGGER_SIDE.load(Ordering::Relaxed);
     let threshold = EDGE_TRIGGER_X.load(Ordering::Relaxed);
     let at_edge   = match side {
@@ -367,7 +398,15 @@ unsafe fn check_edge_and_enter(x: i32, y: i32) {
         3 => y <= threshold,
         _ => false,
     };
-    if at_edge { enter_capture(); }
+    if at_edge {
+        if !connected {
+            return;
+        }
+        tracing::debug!(
+            "edge hit: x={x} y={y} threshold={threshold} side={side} — entering capture"
+        );
+        enter_capture();
+    }
 }
 
 #[cfg(windows)]
