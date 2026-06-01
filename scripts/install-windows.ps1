@@ -53,33 +53,23 @@ if (-not (Get-NetFirewallRule -DisplayName $RuleName -ErrorAction SilentlyContin
 # but wrap it in a .lnk shortcut whose icon points to the .exe.
 # Result: Task Manager / Settings > Startup shows our app icon, not the VBS icon.
 $StartupDir = [Environment]::GetFolderPath("Startup")
-$VbsPath    = "$InstallDir\launcher.vbs"   # lives in install dir, NOT in Startup
 $LnkPath    = "$StartupDir\Yzendris KVM Server.lnk"
 
-# Remove any stale .vbs that may have been left directly in Startup.
+# Remove any stale .vbs launchers left in Startup from older installs.
 Remove-Item "$StartupDir\yzendris-server.vbs" -Force -ErrorAction SilentlyContinue
 
-# (Re)create the VBS launcher in the install dir.
-$vbs = @"
-' yzendris-server launcher - runs hidden, no console window on login.
-Set WshShell = CreateObject("WScript.Shell")
-exePath = WshShell.ExpandEnvironmentStrings("%APPDATA%\yzendris\yzendris-server.exe")
-cfgPath = WshShell.ExpandEnvironmentStrings("%APPDATA%\yzendris\server.toml")
-WshShell.Run """" & exePath & """ --config """ & cfgPath & """", 0, False
-"@
-Set-Content -Path $VbsPath -Value $vbs -Encoding UTF8
-
-# .lnk in Startup: runs wscript.exe <launcher.vbs>, icon from the .exe.
+# Direct .lnk → .exe (no console window because the exe uses windows_subsystem="windows").
+# Windows shows the app name and embedded icon correctly in Task Manager / Startup settings.
 $Wsh = New-Object -ComObject WScript.Shell
 $Lnk = $Wsh.CreateShortcut($LnkPath)
-$Lnk.TargetPath       = "$env:SystemRoot\System32\wscript.exe"
-$Lnk.Arguments        = "`"$VbsPath`""
+$Lnk.TargetPath       = $Dest
+$Lnk.Arguments        = "--config `"$InstallDir\server.toml`""
 $Lnk.WorkingDirectory = $InstallDir
 $Lnk.IconLocation     = "$Dest, 0"
 $Lnk.Description      = "Yzendris KVM Server"
 $Lnk.Save()
 
-Write-Host "✓ startup shortcut with icon: $LnkPath"
+Write-Host "✓ startup shortcut: $LnkPath"
 
 Write-Host ""
 Write-Host "Installation complete."
