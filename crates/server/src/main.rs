@@ -4,6 +4,10 @@
 //
 // On non-Windows: stub that exits with an error.
 
+// No console window when launched on Windows (startup, double-click, etc).
+// Logging goes to %APPDATA%\yzendris\server.log instead of stdout.
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 #[cfg(not(windows))]
 fn main() {
     eprintln!("yzendris-server is Windows-only.");
@@ -133,12 +137,30 @@ fn main() {
 
 #[cfg(windows)]
 async fn async_main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("yzendris_server=debug".parse().unwrap()),
-        )
-        .init();
+    // With windows_subsystem="windows" stdout is detached — log to file instead.
+    let log_path = std::env::var_os("APPDATA")
+        .map(|d| std::path::PathBuf::from(d).join("yzendris").join("server.log"));
+
+    let filter = tracing_subscriber::EnvFilter::from_default_env()
+        .add_directive("yzendris_server=debug".parse().unwrap());
+
+    if let Some(ref path) = log_path {
+        if let Some(parent) = path.parent() { let _ = std::fs::create_dir_all(parent); }
+        match std::fs::OpenOptions::new().create(true).append(true).open(path) {
+            Ok(file) => {
+                tracing_subscriber::fmt()
+                    .with_env_filter(filter)
+                    .with_writer(std::sync::Mutex::new(file))
+                    .with_ansi(false)
+                    .init();
+            }
+            Err(_) => {
+                tracing_subscriber::fmt().with_env_filter(filter).init();
+            }
+        }
+    } else {
+        tracing_subscriber::fmt().with_env_filter(filter).init();
+    }
 
     let args: Vec<String> = std::env::args().collect();
     let config_path = args
