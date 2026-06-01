@@ -48,18 +48,27 @@ if (-not (Get-NetFirewallRule -DisplayName $RuleName -ErrorAction SilentlyContin
     Write-Host "  (firewall rule already exists)"
 }
 
-# ── 4. Startup shortcut ───────────────────────────────────────────────────────
+# ── 4. Startup launcher (VBS, fully hidden — no console flash) ───────────────
 $StartupDir = [Environment]::GetFolderPath("Startup")
-$Shortcut   = "$StartupDir\Yzendris KVM Server.lnk"
-$Wsh = New-Object -ComObject WScript.Shell
-$Lnk = $Wsh.CreateShortcut($Shortcut)
-$Lnk.TargetPath       = $Dest
-$Lnk.Arguments        = "--config `"$InstallDir\server.toml`""
-$Lnk.WorkingDirectory = $InstallDir
-$Lnk.WindowStyle      = 7   # minimised
-$Lnk.Description      = "Yzendris KVM Server"
-$Lnk.Save()
-Write-Host "✓ startup shortcut created: $Shortcut"
+$VbsPath    = "$StartupDir\yzendris-server.vbs"
+$LnkPath    = "$StartupDir\Yzendris KVM Server.lnk"
+
+# Remove stale .lnk if it exists alongside our .vbs (avoids duplicate launches).
+if (Test-Path $LnkPath) { Remove-Item $LnkPath -Force }
+
+if (-not (Test-Path $VbsPath)) {
+    $vbs = @"
+' yzendris-server launcher — runs hidden, no console window on login.
+Set WshShell = CreateObject("WScript.Shell")
+exePath = WshShell.ExpandEnvironmentStrings("%APPDATA%\yzendris\yzendris-server.exe")
+cfgPath = WshShell.ExpandEnvironmentStrings("%APPDATA%\yzendris\server.toml")
+WshShell.Run """" & exePath & """ --config """ & cfgPath & """", 0, False
+"@
+    Set-Content -Path $VbsPath -Value $vbs -Encoding UTF8
+    Write-Host "✓ startup launcher created: $VbsPath"
+} else {
+    Write-Host "  (startup launcher already exists — not overwritten)"
+}
 
 Write-Host ""
 Write-Host "Installation complete."
