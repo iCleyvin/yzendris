@@ -64,7 +64,33 @@ if [[ ! -f "$CFG" ]]; then
     echo "  → Edit $CFG if you need to change port or kb_layout."
 fi
 
-# ── 5. systemd user unit ──────────────────────────────────────────────────────
+# ── 5. Icon + desktop entry ───────────────────────────────────────────────────
+ICON_SRC="$SCRIPT_DIR/../assets/icon.png"
+ICON_DEST="$HOME/.local/share/icons/hicolor/512x512/apps/yzendris.png"
+DESKTOP_FILE="$HOME/.local/share/applications/yzendris-client.desktop"
+
+if [[ -f "$ICON_SRC" ]]; then
+    mkdir -p "$(dirname "$ICON_DEST")"
+    cp "$ICON_SRC" "$ICON_DEST"
+    echo "✓ icon installed: $ICON_DEST"
+
+    mkdir -p "$(dirname "$DESKTOP_FILE")"
+    cat > "$DESKTOP_FILE" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Yzendris KVM
+Comment=Keyboard and mouse sharing (Hyprland/Wayland)
+Exec=$HOME/.local/bin/yzendris-client-wrapper.sh
+Icon=yzendris
+Categories=Utility;
+NoDisplay=true
+EOF
+    echo "✓ desktop entry installed: $DESKTOP_FILE"
+    command -v update-desktop-database &>/dev/null && update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
+    command -v gtk-update-icon-cache   &>/dev/null && gtk-update-icon-cache -f "$HOME/.local/share/icons/hicolor" 2>/dev/null || true
+fi
+
+# ── 6. systemd user unit ──────────────────────────────────────────────────────
 mkdir -p "$(dirname "$UNIT")"
 cat > "$UNIT" <<'EOF'
 [Unit]
