@@ -1,6 +1,6 @@
 //! Client (Linux laptop) configuration panel: listening settings, TLS
 //! fingerprint display, daemon control and log.
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use eframe::egui;
 
@@ -11,58 +11,38 @@ pub struct ClientPanel {
     cfg: ClientConfig,
     fingerprint: Option<String>,
     status_msg: String,
-    running: bool,
-    last_poll: Instant,
-    log: String,
+    monitor: daemon::DaemonMonitor,
 }
 
 impl ClientPanel {
     pub fn new() -> Self {
-        let mut panel = Self {
+        Self {
             cfg: config_model::load_client_config(),
             fingerprint: read_fingerprint(),
             status_msg: String::new(),
-            running: false,
-            last_poll: Instant::now() - Duration::from_secs(60),
-            log: String::new(),
-        };
-        panel.poll();
-        panel
-    }
-
-    fn poll(&mut self) {
-        if self.last_poll.elapsed() < Duration::from_secs(3) {
-            return;
-        }
-        self.last_poll = Instant::now();
-        self.running = daemon::daemon_running();
-        self.log = daemon::read_log_tail(14);
-        if self.fingerprint.is_none() {
-            self.fingerprint = read_fingerprint();
+            monitor: daemon::DaemonMonitor::new(),
         }
     }
 
-    fn save(&mut self) {
+    fn save(&mut self, running: bool) {
         match config_model::save_client_config(&self.cfg) {
             Ok(()) => {
-                self.status_msg = "✔ Configuración guardada".into();
-                if daemon::daemon_running() {
-                    let _ = daemon::stop_daemon();
-                    std::thread::sleep(Duration::from_millis(300));
-                    match daemon::start_daemon() {
-                        Ok(()) => self.status_msg = "✔ Guardado y cliente reiniciado".into(),
-                        Err(e) => self.status_msg = format!("Guardado, pero al reiniciar: {e}"),
-                    }
+                if running {
+                    daemon::restart_async();
+                    self.status_msg = "✔ Guardado, reiniciando cliente…".into();
+                } else {
+                    self.status_msg = "✔ Configuración guardada".into();
                 }
             }
             Err(e) => self.status_msg = format!("✘ Error al guardar: {e}"),
         }
-        self.last_poll = Instant::now() - Duration::from_secs(60);
-        self.poll();
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui) {
-        self.poll();
+        let status = self.monitor.snapshot();
+        if self.fingerprint.is_none() {
+            self.fingerprint = read_fingerprint();
+        }
         ui.ctx().request_repaint_after(Duration::from_secs(1));
 
         if cfg!(windows) {
@@ -127,26 +107,20 @@ impl ClientPanel {
             ui.separator();
             ui.horizontal(|ui| {
                 if ui.button("💾 Guardar configuración").clicked() {
-                    self.save();
+                    self.save(status.running);
                 }
-                if self.running {
+                if status.running {
                     if ui.button("⏹ Detener cliente").clicked() {
-                        match daemon::stop_daemon() {
-                            Ok(()) => self.status_msg = "Cliente detenido".into(),
-                            Err(e) => self.status_msg = e,
-                        }
-                        self.last_poll = Instant::now() - Duration::from_secs(60);
+                        daemon::stop_async();
+                        self.status_msg = "Deteniendo cliente…".into();
                     }
                 } else if ui.button("▶ Iniciar cliente").clicked() {
                     let _ = config_model::save_client_config(&self.cfg);
-                    match daemon::start_daemon() {
-                        Ok(()) => self.status_msg = "Cliente iniciado".into(),
-                        Err(e) => self.status_msg = e,
-                    }
-                    self.last_poll = Instant::now() - Duration::from_secs(60);
+                    daemon::start_async();
+                    self.status_msg = "Iniciando cliente…".into();
                 }
 
-                let (dot, text) = if self.running {
+                let (dot, text) = if status.running {
                     (egui::Color32::GREEN, "en ejecución")
                 } else {
                     (egui::Color32::GRAY, "detenido")
@@ -165,7 +139,7 @@ impl ClientPanel {
                     .max_height(160.0)
                     .stick_to_bottom(true)
                     .show(ui, |ui| {
-                        ui.monospace(&self.log);
+                        ui.monospace(&status.log);
                     });
             });
         });
