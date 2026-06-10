@@ -14,7 +14,9 @@
 set -euo pipefail
 
 BINARY="${1:-./target/release/yzendris-client}"
+GUI_BINARY="${2:-./target/release/yzendris-gui}"
 DEST="$HOME/.local/bin/yzendris-client"
+GUI_DEST="$HOME/.local/bin/yzendris-gui"
 WRAPPER="$HOME/.local/bin/yzendris-client-wrapper.sh"
 UNIT="$HOME/.config/systemd/user/yzendris-client.service"
 CFG_DIR="$HOME/.config/yzendris"
@@ -22,10 +24,17 @@ CFG="$CFG_DIR/client.toml"
 PORT=7547
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-# ── 1. Copy binary ────────────────────────────────────────────────────────────
+# ── 1. Copy binaries ──────────────────────────────────────────────────────────
 mkdir -p "$(dirname "$DEST")"
 install -m 755 "$BINARY" "$DEST"
 echo "✓ installed $DEST"
+
+if [[ -f "$GUI_BINARY" ]]; then
+    install -m 755 "$GUI_BINARY" "$GUI_DEST"
+    echo "✓ installed $GUI_DEST"
+else
+    echo "  (GUI not found at $GUI_BINARY — build with: cargo build --release -p yzendris-gui)"
+fi
 
 # ── 2. Create wrapper script ──────────────────────────────────────────────────
 # The wrapper injects Wayland / Hyprland environment variables that are absent
@@ -86,6 +95,22 @@ Categories=Utility;
 NoDisplay=true
 EOF
     echo "✓ desktop entry installed: $DESKTOP_FILE"
+
+    # Visible launcher for the GUI configurator.
+    if [[ -f "$GUI_DEST" ]]; then
+        GUI_DESKTOP_FILE="$HOME/.local/share/applications/yzendris-gui.desktop"
+        cat > "$GUI_DESKTOP_FILE" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Yzendris KVM
+Comment=Configure keyboard and mouse sharing
+Exec=$GUI_DEST
+Icon=yzendris
+Categories=Utility;Settings;
+EOF
+        echo "✓ GUI desktop entry installed: $GUI_DESKTOP_FILE"
+    fi
+
     command -v update-desktop-database &>/dev/null && update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
     command -v gtk-update-icon-cache   &>/dev/null && gtk-update-icon-cache -f "$HOME/.local/share/icons/hicolor" 2>/dev/null || true
 fi

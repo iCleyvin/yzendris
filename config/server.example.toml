@@ -9,7 +9,21 @@ port = 7547
 
 # Which screen edge triggers capture (cursor crosses → laptop takes over).
 # Options: "right" | "left" | "top" | "bottom"
+# Only used when [layout] below is absent or mode = "edge".
 edge = "right"
+
+# ── Multi-monitor: laptop BETWEEN two monitors ────────────────────────────────
+# If the laptop physically sits between two of this PC's monitors, uncomment
+# this section. Crossing the boundary between the two monitors routes the
+# cursor through the laptop in both directions (PC screen 1 → laptop → PC
+# screen 2), no release combo needed.
+# Monitor names are the Windows device names ("DISPLAY1", "DISPLAY2", …) —
+# the GUI (yzendris-gui) detects and writes them for you.
+#
+# [layout]
+# mode = "between"
+# monitor_left  = "DISPLAY1"   # monitor at the LEFT of the laptop
+# monitor_right = "DISPLAY2"   # monitor at the RIGHT of the laptop
 
 # Heartbeat interval in ms. Client disconnects if it stops receiving these.
 heartbeat_ms = 1000

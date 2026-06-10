@@ -25,6 +25,8 @@ mod edge;
 #[cfg(windows)]
 mod hook;
 #[cfg(windows)]
+mod monitors;
+#[cfg(windows)]
 mod net;
 #[cfg(windows)]
 mod tls;
@@ -67,6 +69,28 @@ struct Config {
     /// certificate fingerprint against `trusted_peers.txt`.
     #[serde(default)]
     tls: bool,
+
+    /// Optional multi-monitor layout (laptop *between* two monitors).
+    /// When absent or mode="edge", the classic `edge` setting applies.
+    #[serde(default)]
+    layout: Option<LayoutConfig>,
+}
+
+#[cfg(windows)]
+#[derive(Deserialize, Debug, Default, Clone)]
+struct LayoutConfig {
+    /// "edge" (classic) or "between" (laptop between two monitors).
+    #[serde(default)]
+    mode: String,
+
+    /// Device name of the monitor at the LEFT of the laptop ("DISPLAY1", "1").
+    /// Empty = auto-pick the leftmost of the first two monitors.
+    #[serde(default)]
+    monitor_left: String,
+
+    /// Device name of the monitor at the RIGHT of the laptop.
+    #[serde(default)]
+    monitor_right: String,
 }
 
 #[cfg(windows)]
@@ -90,6 +114,7 @@ impl Default for Config {
             heartbeat_ms: default_heartbeat_ms(),
             clipboard:    default_clipboard(),
             tls:          false,
+            layout:       None,
         }
     }
 }
@@ -171,19 +196,14 @@ async fn async_main() -> Result<()> {
     let config = load_config(config_path)?;
     info!("config: {config:?}");
 
-    // Resolve edge configuration.
-    let edge_kind = edge::Edge::from_str(&config.edge)
-        .unwrap_or_else(|| {
-            tracing::warn!("unknown edge '{}' — defaulting to 'right'", config.edge);
-            edge::Edge::Right
-        });
-    let detector = edge::EdgeDetector::new(edge_kind);
-    let (cx, cy) = detector.center();
+    // Resolve the screen layout (classic edge or laptop-between-monitors).
+    let layout = build_layout(&config);
+    info!("layout: {layout:?}");
 
-    // Tell the hook where to park the cursor and which edge to watch.
-    hook::set_capture_center(cx, cy);
-    let (trigger_coord, side) = compute_trigger(edge_kind);
-    hook::configure_edge(trigger_coord, side);
+    // Park the captured cursor at the centre of the virtual screen.
+    let vs = edge::virtual_screen();
+    hook::set_capture_center((vs.left + vs.right) / 2, (vs.top + vs.bottom) / 2);
+    hook::configure_layout(layout);
 
     // Create channel: hook → net.
     let (event_tx, event_rx) =
@@ -192,7 +212,7 @@ async fn async_main() -> Result<()> {
 
     // Start the Win32 hook thread.
     hook::start();
-    info!("hooks installed, edge={:?}, center=({cx},{cy})", edge_kind);
+    info!("hooks installed");
 
     // Build optional TLS connector.
     let tls_connector = if config.tls {
@@ -226,26 +246,81 @@ async fn async_main() -> Result<()> {
     Ok(())
 }
 
+/// Build the runtime layout from config + actual monitor geometry.
+/// Falls back to classic edge mode when "between" can't be satisfied
+/// (missing monitors, only one display, unknown names…).
 #[cfg(windows)]
-fn compute_trigger(edge: edge::Edge) -> (i32, u8) {
-    // We need the boundary coordinate.  Reconstruct from center + virtual dims.
-    // EdgeDetector exposes center() but not the raw edges — derive from the
-    // screen metrics again (same call, cheap).
-    use windows::Win32::UI::WindowsAndMessaging::{
-        GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
-        SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+fn build_layout(config: &Config) -> hook::Layout {
+    let edge_layout = || {
+        let edge_kind = edge::Edge::from_str(&config.edge).unwrap_or_else(|| {
+            tracing::warn!("unknown edge '{}' — defaulting to 'right'", config.edge);
+            edge::Edge::Right
+        });
+        hook::Layout::Edge { side: edge_kind.side(), screen: edge::virtual_screen() }
     };
-    let (min_x, min_y, max_x, max_y) = unsafe {
-        let vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
-        let vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
-        let vw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
-        let vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
-        (vx, vy, vx + vw - 1, vy + vh - 1)
+
+    let Some(layout_cfg) = config.layout.as_ref().filter(|l| l.mode == "between") else {
+        return edge_layout();
     };
-    match edge {
-        edge::Edge::Right  => (max_x, 0),
-        edge::Edge::Left   => (min_x, 1),
-        edge::Edge::Bottom => (max_y, 2),
-        edge::Edge::Top    => (min_y, 3),
+
+    let mons = monitors::enumerate();
+    if mons.len() < 2 {
+        tracing::warn!(
+            "layout mode 'between' needs 2+ monitors but {} detected — falling back to edge mode",
+            mons.len()
+        );
+        return edge_layout();
+    }
+
+    // Resolve the two monitors flanking the laptop.
+    let (left_m, right_m) = if !layout_cfg.monitor_left.is_empty()
+        && !layout_cfg.monitor_right.is_empty()
+    {
+        match (
+            monitors::find(&mons, &layout_cfg.monitor_left),
+            monitors::find(&mons, &layout_cfg.monitor_right),
+        ) {
+            (Some(a), Some(b)) => (a.clone(), b.clone()),
+            _ => {
+                tracing::warn!(
+                    "layout monitors '{}'/'{}' not found (have: {:?}) — falling back to edge mode",
+                    layout_cfg.monitor_left,
+                    layout_cfg.monitor_right,
+                    mons.iter().map(|m| m.device.clone()).collect::<Vec<_>>()
+                );
+                return edge_layout();
+            }
+        }
+    } else {
+        // Auto: the two monitors sorted left-to-right.
+        let mut sorted = mons.clone();
+        sorted.sort_by_key(|m| m.left);
+        (sorted[0].clone(), sorted[1].clone())
+    };
+
+    // Ensure left really is to the left of right (swap if user mixed them up).
+    let (left_m, right_m) = if left_m.left <= right_m.left {
+        (left_m, right_m)
+    } else {
+        tracing::warn!("monitor_left/right appear swapped — correcting");
+        (right_m, left_m)
+    };
+
+    let boundary_x = left_m.right;
+    if (right_m.left - boundary_x).abs() > 1 {
+        tracing::warn!(
+            "monitors '{}' and '{}' are not adjacent (gap of {}px) — boundary at x={}",
+            left_m.device, right_m.device, right_m.left - boundary_x, boundary_x
+        );
+    }
+
+    hook::Layout::Between {
+        left_mon: hook::Rect {
+            left: left_m.left, top: left_m.top, right: left_m.right, bottom: left_m.bottom,
+        },
+        right_mon: hook::Rect {
+            left: right_m.left, top: right_m.top, right: right_m.right, bottom: right_m.bottom,
+        },
+        boundary_x,
     }
 }

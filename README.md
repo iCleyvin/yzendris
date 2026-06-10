@@ -37,7 +37,16 @@ like a USB one plugged in. Modifiers work. Binds fire.
 
 ## What it currently does
 
-- Mouse cursor crosses by hitting a configured screen edge (default: right).
+- Mouse cursor crosses by hitting a configured screen edge (default: right),
+  and **crosses back** when you push the matching edge of the client screen —
+  no key combo needed (the combo `Ctrl+Shift+Alt` still works as an escape).
+- **Laptop-in-the-middle layouts**: with `[layout] mode = "between"` the laptop
+  sits between two of the PC's monitors — PC screen 1 → laptop → PC screen 2,
+  seamlessly in both directions.
+- **Graphical configurator** (`yzendris-gui`): one app for both machines — on
+  first run it asks whether the machine is the Host or a Client, detects your
+  monitors, lets you place the laptop visually, manages TLS pairing, and
+  starts/stops the daemon.
 - All keys including `Super` / `Ctrl` / `Alt` and combinations of them work.
 - Mouse buttons (L/M/R/side1/side2), scroll (vertical and horizontal).
 - Bidirectional clipboard sync on capture transitions.
@@ -50,14 +59,14 @@ like a USB one plugged in. Modifiers work. Binds fire.
 
 ## What it doesn't do (yet)
 
-- No bidirectional cursor crossing — you go back to the host with the release
-  combo (`Ctrl+Shift+Alt`), not by hitting the laptop's left edge.
 - Hyprland-specific runtime layout assignment. On Sway/Niri/river the install
   works but you might need to set `kb_layout` manually in `client.toml` (or
   rely on your compositor's global keyboard config — global config DOES apply
   to the virtual device, so it usually just works).
-- No GUI, no packaged installer. Just two binaries and two install scripts.
+- No packaged installer — binaries plus two install scripts.
 - No clipboard sync for binary/image clipboards — text only.
+- The Host role runs on Windows and the Client role on Linux (that's the
+  combination the project exists to fix). The GUI runs on both.
 
 ## Requirements
 
@@ -74,10 +83,10 @@ Tested daily on Hyprland 0.55.x with Omarchy on CachyOS, talking to Windows 11.
 
 ```bash
 # Windows
-cargo build --release -p yzendris-server
+cargo build --release -p yzendris-server -p yzendris-gui
 
 # Linux
-cargo build --release -p yzendris-client
+cargo build --release -p yzendris-client -p yzendris-gui
 ```
 
 ### Install (Linux, in the wlroots session)
@@ -102,8 +111,15 @@ launches at login.
 
 ### Configure
 
-Edit `%APPDATA%\yzendris\server.toml` on Windows and set `client_addr` to your
-Linux machine's LAN IP. Leave `tls = true`.
+The easy way: run `yzendris-gui` on each machine. It asks whether the machine
+is the **Host** (shares its keyboard/mouse) or a **Client** (receives them),
+then shows the matching panel — connection settings, monitor arrangement with
+laptop placement, TLS pairing, and start/stop buttons.
+
+The manual way: edit `%APPDATA%\yzendris\server.toml` on Windows and set
+`client_addr` to your Linux machine's LAN IP. Leave `tls = true`. If your
+laptop sits between two PC monitors, add the `[layout]` section (see the
+configuration reference below).
 
 ### Pair (one-time, takes ~30 seconds)
 
@@ -118,8 +134,12 @@ Linux machine's LAN IP. Leave `tls = true`.
    `#` comments allowed).
 3. Restart the Windows server.
 
-That's it. Cursor goes right → laptop takes over. `Ctrl+Shift+Alt` → cursor
-comes back.
+(With the GUI: copy the fingerprint shown in the Client panel and paste it in
+the Host panel's "Huellas TLS confiables" box.)
+
+That's it. Cursor goes right → laptop takes over. Push the client screen's
+edge facing the PC → cursor comes back. `Ctrl+Shift+Alt` also brings it back
+from anywhere.
 
 ## Configuration reference
 
@@ -129,10 +149,22 @@ comes back.
 | -------------- | ------------------ | ----- |
 | `client_addr`  | `"192.168.1.42"`   | LAN IP of the Linux client (edit this!) |
 | `port`         | `7547`             | TCP port the client listens on |
-| `edge`         | `"right"`          | `right` / `left` / `top` / `bottom` |
+| `edge`         | `"right"`          | `right` / `left` / `top` / `bottom` (classic mode) |
 | `heartbeat_ms` | `1000`             | Heartbeat interval. Client gives up at 5× this. |
 | `clipboard`    | `true`             | Sync clipboard on capture/release |
 | `tls`          | `true`             | Verify peer fingerprint. Keep on. |
+
+Optional `[layout]` table — laptop between two monitors:
+
+| Field           | Example      | Notes |
+| --------------- | ------------ | ----- |
+| `mode`          | `"between"`  | `"edge"` (default) or `"between"` |
+| `monitor_left`  | `"DISPLAY1"` | Windows device name of the monitor LEFT of the laptop |
+| `monitor_right` | `"DISPLAY2"` | Monitor RIGHT of the laptop |
+
+In `between` mode, crossing the boundary between the two monitors routes the
+cursor through the laptop in both directions. The GUI detects monitor names
+and writes this section for you.
 
 ### `client.toml` (Linux)
 

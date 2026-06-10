@@ -22,6 +22,8 @@ mod net;
 #[cfg(target_os = "linux")]
 mod tls;
 #[cfg(target_os = "linux")]
+mod tracker;
+#[cfg(target_os = "linux")]
 mod uinput;
 
 #[cfg(target_os = "linux")]
@@ -249,8 +251,11 @@ async fn run_tcp_mode(
     clipboard_enabled: bool,
     tls_acceptor: Option<&tokio_rustls::TlsAcceptor>,
 ) -> Result<()> {
+    let mut cursor_tracker = tracker::CursorTracker::new();
+
     loop {
         let (tx, mut rx) = mpsc::unbounded_channel::<Event>();
+        let (out_tx, out_rx) = mpsc::unbounded_channel::<Event>();
 
         // Accept one connection; this returns when it disconnects.
         let net_handle = {
@@ -258,7 +263,7 @@ async fn run_tcp_mode(
             // Clone the acceptor (Arc inside, so cheap).
             let acceptor = tls_acceptor.cloned();
             tokio::spawn(async move {
-                if let Err(e) = net::run_once(&addr, tx, heartbeat_timeout_ms, clipboard_enabled, acceptor.as_ref()).await {
+                if let Err(e) = net::run_once(&addr, tx, out_rx, heartbeat_timeout_ms, clipboard_enabled, acceptor.as_ref()).await {
                     error!("net error: {e}");
                 }
             })
@@ -269,12 +274,23 @@ async fn run_tcp_mode(
             match &event {
                 Event::CaptureEnd => {
                     info!("CaptureEnd received — releasing all keys");
+                    cursor_tracker.on_capture_end();
                     if let Err(e) = device.release_all() {
                         error!("release_all: {e}");
                     }
                 }
                 Event::CaptureStart => {
                     info!("CaptureStart — ready to inject");
+                    cursor_tracker.on_capture_start();
+                }
+                Event::EnterAt { edge, frac } => {
+                    cursor_tracker.on_enter_at(*edge, *frac);
+                }
+                Event::MouseMove { dx, dy } => {
+                    if let Err(e) = device.inject(&event) {
+                        error!("inject error: {e}");
+                    }
+                    cursor_tracker.on_mouse_move(*dx, *dy, &out_tx);
                 }
                 other => {
                     if let Err(e) = device.inject(other) {
