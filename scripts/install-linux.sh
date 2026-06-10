@@ -50,8 +50,14 @@ export XDG_SESSION_TYPE="wayland"
 
 HIS_DIR="${XDG_RUNTIME_DIR}/hypr"
 if [ -d "$HIS_DIR" ]; then
-    SIG=$(ls -1 "$HIS_DIR" 2>/dev/null | head -1)
-    [ -n "$SIG" ] && export HYPRLAND_INSTANCE_SIGNATURE="$SIG"
+    # Pick the newest instance that still has a live IPC socket — stale dirs
+    # from previous sessions can coexist with the running one.
+    for d in $(ls -1t "$HIS_DIR" 2>/dev/null); do
+        if [ -S "$HIS_DIR/$d/.socket.sock" ]; then
+            export HYPRLAND_INSTANCE_SIGNATURE="$d"
+            break
+        fi
+    done
 fi
 
 exec "$HOME/.local/bin/yzendris-client" "$@"

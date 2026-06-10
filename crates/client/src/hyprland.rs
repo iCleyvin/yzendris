@@ -9,25 +9,39 @@ use anyhow::{Context, Result};
 /// Tries `HYPRLAND_INSTANCE_SIGNATURE` first; if unset, scans
 /// `/run/user/<uid>/hypr/` for the first directory entry.
 fn instance_signature() -> Option<String> {
+    let uid = libc_getuid();
+    let hypr_dir = format!("/run/user/{uid}/hypr");
+
+    // Trust the env var only if its instance is actually alive — after a
+    // compositor restart the inherited signature points at a dead socket.
     if let Ok(sig) = std::env::var("HYPRLAND_INSTANCE_SIGNATURE") {
-        if !sig.is_empty() {
+        if !sig.is_empty()
+            && std::path::Path::new(&format!("{hypr_dir}/{sig}/.socket.sock")).exists()
+        {
             return Some(sig);
         }
     }
 
-    // Derive from filesystem: /run/user/<uid>/hypr/<sig>/.socket.sock
-    let uid = libc_getuid();
-    let hypr_dir = format!("/run/user/{uid}/hypr");
+    // Scan /run/user/<uid>/hypr/: stale dirs from previous sessions can
+    // coexist with the live one, so pick the most recently modified dir
+    // that still has its IPC socket.
     let entries = std::fs::read_dir(&hypr_dir).ok()?;
+    let mut best: Option<(std::time::SystemTime, String)> = None;
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.is_dir() {
-            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                return Some(name.to_owned());
-            }
+        if !path.is_dir() || !path.join(".socket.sock").exists() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
+        let mtime = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        if best.as_ref().map_or(true, |(t, _)| mtime > *t) {
+            best = Some((mtime, name.to_owned()));
         }
     }
-    None
+    best.map(|(_, name)| name)
 }
 
 /// Thin wrapper around `libc::getuid` — we only need this to find the runtime dir.
@@ -105,6 +119,28 @@ fn hyprctl(args: &[&str]) -> Option<String> {
     Some(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+/// `hyprctl` exits 0 even when the command fails (e.g. on Lua-config builds
+/// the classic syntax prints an error but still returns success), so the only
+/// reliable success signal is the literal "ok" reply.
+fn hyprctl_ok(args: &[&str]) -> bool {
+    match hyprctl(args) {
+        Some(out) => {
+            let ok = out.trim() == "ok";
+            if !ok {
+                tracing::debug!("hyprctl {:?} replied: {}", args, out.trim());
+            }
+            ok
+        }
+        None => false,
+    }
+}
+
+/// Whether this Hyprland build uses the Lua (v2) config API, where the
+/// classic `hyprctl dispatch movecursor X Y` / `hyprctl keyword …` syntax is
+/// rejected ("keyword can't work with non-legacy parsers. Use eval.") and
+/// commands must go through `hyprctl eval "hl.…"`. Detected on first use.
+static LUA_MODE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
 /// Current cursor position in global (layout) coordinates.
 /// `hyprctl cursorpos` prints "x, y".
 pub fn cursor_pos() -> Option<(i32, i32)> {
@@ -141,10 +177,32 @@ pub fn focused_monitor_rect() -> Option<(i32, i32, i32, i32)> {
 /// Warp the cursor to global coordinates (used when the mouse enters from
 /// the Windows side so it appears at the matching edge).
 pub fn move_cursor(x: i32, y: i32) {
-    let xs = x.to_string();
-    let ys = y.to_string();
-    if hyprctl(&["dispatch", "movecursor", &xs, &ys]).is_none() {
-        tracing::warn!("hyprctl dispatch movecursor failed");
+    let classic = |x: i32, y: i32| {
+        hyprctl_ok(&["dispatch", "movecursor", &x.to_string(), &y.to_string()])
+    };
+    let lua = |x: i32, y: i32| {
+        let expr = format!("hl.dispatch(hl.dsp.cursor.move({{ x = {x}, y = {y} }}))");
+        hyprctl_ok(&["eval", &expr])
+    };
+
+    let ok = match LUA_MODE.get() {
+        Some(false) => classic(x, y),
+        Some(true) => lua(x, y),
+        None => {
+            if classic(x, y) {
+                LUA_MODE.set(false).ok();
+                true
+            } else if lua(x, y) {
+                tracing::info!("Hyprland Lua config API detected — using hl.* commands");
+                LUA_MODE.set(true).ok();
+                true
+            } else {
+                false
+            }
+        }
+    };
+    if !ok {
+        tracing::warn!("movecursor({x},{y}) failed in both classic and Lua forms");
     }
 }
 
@@ -154,22 +212,65 @@ pub fn move_cursor(x: i32, y: i32) {
 /// This is the critical step documented in CLAUDE.md — without it modifiers
 /// don't register in Hyprland binds.
 pub fn apply_layout(device_name: &str, layout: &str) -> Result<()> {
-    let sig = instance_signature()
-        .context("could not determine HYPRLAND_INSTANCE_SIGNATURE")?;
+    instance_signature().context("could not determine HYPRLAND_INSTANCE_SIGNATURE")?;
 
-    let keyword = format!("device:{device_name}");
-    let status = std::process::Command::new("hyprctl")
-        .args(["-r", "keyword", &keyword, layout])
-        .env("HYPRLAND_INSTANCE_SIGNATURE", &sig)
-        .status()
-        .context("hyprctl keyword")?;
-
-    if status.success() {
-        tracing::info!("applied kb_layout={layout} to device '{device_name}'");
-    } else {
-        tracing::warn!(
-            "hyprctl keyword returned non-zero ({status}) for device '{device_name}'"
+    // If the compositor's global config already gives the device the right
+    // layout, do NOT touch it: creating a per-device rule (Lua hl.device)
+    // has been observed to degrade event processing for the device.
+    if device_layout(device_name).as_deref() == Some(layout) {
+        tracing::info!(
+            "kb_layout '{layout}' already active on '{device_name}' (inherited) — nothing to do"
         );
+        return Ok(());
+    }
+
+    // Classic (pre-Lua) runtime keyword.
+    let keyword = format!("device:{device_name}:kb_layout");
+    let classic_ok = hyprctl_ok(&["-r", "keyword", &keyword, layout]);
+
+    // Lua (v2) config API fallback.
+    let lua_ok = if classic_ok {
+        LUA_MODE.set(false).ok();
+        false
+    } else {
+        let expr = format!("hl.device({{ name = '{device_name}', kb_layout = '{layout}' }})");
+        let ok = hyprctl_ok(&["eval", &expr]);
+        if ok {
+            tracing::info!("Hyprland Lua config API detected — using hl.* commands");
+            LUA_MODE.set(true).ok();
+        }
+        ok
+    };
+
+    // Verify against what Hyprland actually reports for the device.
+    let actual = device_layout(device_name);
+    match (&actual, classic_ok || lua_ok) {
+        (Some(actual), _) if actual == layout => {
+            tracing::info!("kb_layout '{layout}' active on device '{device_name}'");
+        }
+        (Some(actual), applied) => {
+            tracing::warn!(
+                "kb_layout mismatch on '{device_name}': wanted '{layout}', device reports \
+                 '{actual}' (apply command success: {applied})"
+            );
+        }
+        (None, applied) => {
+            tracing::warn!(
+                "could not verify kb_layout on '{device_name}' (apply command success: {applied})"
+            );
+        }
     }
     Ok(())
+}
+
+/// Layout that Hyprland currently reports for `device_name`, if visible.
+fn device_layout(device_name: &str) -> Option<String> {
+    let out = hyprctl(&["devices", "-j"])?;
+    let json: serde_json::Value = serde_json::from_str(&out).ok()?;
+    json["keyboards"]
+        .as_array()?
+        .iter()
+        .find(|kb| kb["name"].as_str() == Some(device_name))
+        .and_then(|kb| kb["layout"].as_str())
+        .map(|s| s.split('(').next().unwrap_or(s).trim().to_owned())
 }
