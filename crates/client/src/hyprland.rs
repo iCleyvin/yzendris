@@ -214,6 +214,15 @@ pub fn move_cursor(x: i32, y: i32) {
 pub fn apply_layout(device_name: &str, layout: &str) -> Result<()> {
     instance_signature().context("could not determine HYPRLAND_INSTANCE_SIGNATURE")?;
 
+    // `layout` may come from a user-edited config and is interpolated into a
+    // Lua expression for `hyprctl eval`, so reject anything that isn't a plain
+    // XKB layout token to avoid Lua injection (e.g. "es'}}) os.execute(...) --").
+    // Valid XKB layouts look like "es", "us", "es,us", "latam".
+    if !layout.bytes().all(|b| b.is_ascii_lowercase() || b == b',') || layout.is_empty() {
+        tracing::warn!("rejecting suspicious kb_layout '{layout}' — falling back to 'us'");
+        return apply_layout(device_name, "us");
+    }
+
     // If the compositor's global config already gives the device the right
     // layout, do NOT touch it: creating a per-device rule (Lua hl.device)
     // has been observed to degrade event processing for the device.

@@ -110,6 +110,15 @@ fn held_keys_clear() {
     HELD_KEYS.with(|hk| *hk.borrow_mut() = [0u64; 8]);
 }
 
+fn held_key_is_set(code: u16) -> bool {
+    let idx = code as usize / 64;
+    let bit = code as usize % 64;
+    if idx >= 8 {
+        return false;
+    }
+    HELD_KEYS.with(|hk| hk.borrow()[idx] & (1u64 << bit) != 0)
+}
+
 // ─── Public API ──────────────────────────────────────────────────────────────
 
 /// Initialise the event sender.  Must be called before `start`.
@@ -201,7 +210,9 @@ static LAYOUT: OnceLock<Layout> = OnceLock::new();
 
 /// Pixels we inset the cursor from the boundary/edge when handing control
 /// back, so the very next mouse move doesn't instantly re-trigger capture.
-const RETURN_MARGIN: i32 = 4;
+/// Large enough that a normal post-return mouse move doesn't immediately
+/// re-cross the threshold.
+const RETURN_MARGIN: i32 = 16;
 
 /// Previous (non-captured) cursor position — used to detect boundary
 /// crossings in `Between` mode. PREV_VALID guards the first event.
@@ -339,6 +350,15 @@ unsafe extern "system" fn kb_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> 
         }
 
         if let Some(evdev_code) = scancode_to_evdev(kb.scanCode, is_extended) {
+            // Drop auto-repeat: Windows posts repeated WM_KEYDOWN while a key
+            // is held, but the client's kernel already repeats a held uinput
+            // key on its own. Forwarding the repeats would double them.
+            // A WM_KEYDOWN for a key already marked down is a repeat.
+            // (LL hooks don't expose LLKHF_AUTOREPEAT, so we dedup by state.)
+            if is_down && held_key_is_set(evdev_code) {
+                return LRESULT(1); // suppress repeat
+            }
+
             // Track held keys for stuck-key recovery on disconnect.
             held_key_set(evdev_code, is_down);
 
@@ -487,17 +507,25 @@ unsafe fn check_edge_and_enter(x: i32, y: i32) -> bool {
             if !prev_valid || !connected {
                 return false;
             }
-            if px < boundary_x && x >= boundary_x {
+            // The laptop only bridges the band the two monitors share
+            // vertically. Crossing the boundary OUTSIDE that band (e.g. at a
+            // height where one monitor is taller than the other) should pass
+            // straight monitor→monitor, not route through the laptop.
+            let band_top = left_mon.top.max(right_mon.top);
+            let band_bottom = left_mon.bottom.min(right_mon.bottom);
+            let in_band = y >= band_top && y < band_bottom;
+
+            if px < boundary_x && x >= boundary_x && in_band {
                 // Crossing left monitor → right monitor: route through laptop,
                 // entering its LEFT edge.
-                let frac = frac_of(y, left_mon.top, left_mon.bottom);
+                let frac = frac_of(y, band_top, band_bottom);
                 tracing::debug!("boundary cross L→R at y={y} — entering capture");
                 enter_capture(EDGE_LEFT, frac, 0);
                 return true;
             }
-            if px >= boundary_x && x < boundary_x {
+            if px >= boundary_x && x < boundary_x && in_band {
                 // Crossing right monitor → left monitor: enter laptop's RIGHT edge.
-                let frac = frac_of(y, right_mon.top, right_mon.bottom);
+                let frac = frac_of(y, band_top, band_bottom);
                 tracing::debug!("boundary cross R→L at y={y} — entering capture");
                 enter_capture(EDGE_RIGHT, frac, 1);
                 return true;
@@ -541,21 +569,27 @@ pub fn release_capture_toward(edge: u8, frac: f32) {
 
     // Work out where the cursor should reappear on the Windows desktop.
     let target: Option<(i32, i32)> = match *layout {
-        Layout::Between { left_mon, right_mon, boundary_x } => match edge {
-            // Client cursor left through its RIGHT edge → continue on the
-            // right monitor, just past the boundary.
-            EDGE_RIGHT => Some((
-                boundary_x + RETURN_MARGIN,
-                lerp_clamped(right_mon.top, right_mon.bottom, frac),
-            )),
-            // Client cursor left through its LEFT edge → back to the left
-            // monitor, just before the boundary.
-            EDGE_LEFT => Some((
-                boundary_x - 1 - RETURN_MARGIN,
-                lerp_clamped(left_mon.top, left_mon.bottom, frac),
-            )),
-            _ => None,
-        },
+        Layout::Between { left_mon, right_mon, boundary_x } => {
+            // `frac` is relative to the shared vertical band (same basis as
+            // capture entry), so map it back through that band.
+            let band_top = left_mon.top.max(right_mon.top);
+            let band_bottom = left_mon.bottom.min(right_mon.bottom);
+            match edge {
+                // Client cursor left through its RIGHT edge → continue on the
+                // right monitor, just past the boundary.
+                EDGE_RIGHT => Some((
+                    boundary_x + RETURN_MARGIN,
+                    lerp_clamped(band_top, band_bottom, frac),
+                )),
+                // Client cursor left through its LEFT edge → back to the left
+                // monitor, just before the boundary.
+                EDGE_LEFT => Some((
+                    boundary_x - 1 - RETURN_MARGIN,
+                    lerp_clamped(band_top, band_bottom, frac),
+                )),
+                _ => None,
+            }
+        }
         Layout::Edge { side, screen } => match (side, edge) {
             // Only the edge facing the PC hands control back.
             (0, EDGE_LEFT)   => Some((screen.right - 1 - RETURN_MARGIN,

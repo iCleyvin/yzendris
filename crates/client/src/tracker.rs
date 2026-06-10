@@ -3,8 +3,13 @@
 /// when the user pushes past an edge.
 ///
 /// Position is estimated by accumulating MouseMove deltas and periodically
-/// resyncing against the real cursor (`hyprctl cursorpos`) to cancel any
-/// drift introduced by pointer acceleration.
+/// resyncing against the real cursor to cancel any drift introduced by
+/// pointer acceleration.  The real cursor is read by a background thread
+/// (`hyprctl cursorpos` forks a process, which must NOT run on the async
+/// reactor) that publishes the latest sample into shared atomics; the hot
+/// path only reads those atomics.
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc::UnboundedSender;
@@ -16,8 +21,21 @@ use crate::hyprland;
 /// Small enough to feel instant, large enough to ignore incidental contact.
 const OVERSHOOT_THRESHOLD: f64 = 25.0;
 
-/// How often we resync the estimated position with the real cursor.
+/// How often the hot path adopts the latest background cursor sample.
 const RESYNC_INTERVAL: Duration = Duration::from_millis(150);
+
+/// How often the background thread samples the real cursor while capturing.
+const SAMPLE_INTERVAL: Duration = Duration::from_millis(70);
+
+/// Shared snapshot written by the sampler thread, read by the hot path.
+#[derive(Default)]
+struct Sampler {
+    x: AtomicI32,
+    y: AtomicI32,
+    valid: AtomicBool,
+    /// Sample only while a capture session is active.
+    active: AtomicBool,
+}
 
 pub struct CursorTracker {
     /// Focused monitor rect in global logical coords: (x, y, w, h).
@@ -31,10 +49,29 @@ pub struct CursorTracker {
     /// Only track while a capture session is active and EdgeReached unsent.
     active: bool,
     last_sync: Instant,
+    sampler: Arc<Sampler>,
 }
 
 impl CursorTracker {
     pub fn new() -> Self {
+        let sampler = Arc::new(Sampler::default());
+
+        // Background sampler: forks `hyprctl` off the async reactor.
+        let s = sampler.clone();
+        std::thread::Builder::new()
+            .name("yzendris-cursor-sampler".into())
+            .spawn(move || loop {
+                if s.active.load(Ordering::Relaxed) {
+                    if let Some((x, y)) = hyprland::cursor_pos() {
+                        s.x.store(x, Ordering::Relaxed);
+                        s.y.store(y, Ordering::Relaxed);
+                        s.valid.store(true, Ordering::Relaxed);
+                    }
+                }
+                std::thread::sleep(SAMPLE_INTERVAL);
+            })
+            .ok();
+
         Self {
             rect: (0, 0, 1920, 1080),
             x: 0.0,
@@ -43,10 +80,13 @@ impl CursorTracker {
             overshoot_edge: EDGE_RIGHT,
             active: false,
             last_sync: Instant::now(),
+            sampler,
         }
     }
 
     /// CaptureStart: refresh monitor geometry and the current cursor position.
+    /// These one-shot `hyprctl` calls happen at the capture transition, not in
+    /// the per-event hot path, so blocking here is acceptable.
     pub fn on_capture_start(&mut self) {
         if let Some(rect) = hyprland::focused_monitor_rect() {
             self.rect = rect;
@@ -54,15 +94,25 @@ impl CursorTracker {
         if let Some((cx, cy)) = hyprland::cursor_pos() {
             self.x = cx as f64;
             self.y = cy as f64;
+            self.sampler.x.store(cx, Ordering::Relaxed);
+            self.sampler.y.store(cy, Ordering::Relaxed);
+            self.sampler.valid.store(true, Ordering::Relaxed);
+        } else {
+            self.sampler.valid.store(false, Ordering::Relaxed);
         }
         self.overshoot = 0.0;
         self.active = true;
         self.last_sync = Instant::now();
+        self.sampler.active.store(true, Ordering::Relaxed);
         tracing::debug!("tracker: capture start, rect={:?}", self.rect);
     }
 
     /// EnterAt: warp the cursor to the entry edge at `frac` along it.
     pub fn on_enter_at(&mut self, edge: u8, frac: f32) {
+        // Re-read geometry in case focus moved between CaptureStart and EnterAt.
+        if let Some(rect) = hyprland::focused_monitor_rect() {
+            self.rect = rect;
+        }
         let (rx, ry, rw, rh) = self.rect;
         let frac = frac.clamp(0.0, 1.0) as f64;
         let (tx, ty) = match edge {
@@ -75,12 +125,16 @@ impl CursorTracker {
         hyprland::move_cursor(tx, ty);
         self.x = tx as f64;
         self.y = ty as f64;
+        self.sampler.x.store(tx, Ordering::Relaxed);
+        self.sampler.y.store(ty, Ordering::Relaxed);
+        self.sampler.valid.store(true, Ordering::Relaxed);
         self.overshoot = 0.0;
         tracing::debug!("tracker: enter at edge {edge} → ({tx},{ty})");
     }
 
     pub fn on_capture_end(&mut self) {
         self.active = false;
+        self.sampler.active.store(false, Ordering::Relaxed);
     }
 
     /// MouseMove: update the estimate; when the user pushes past an edge hard
@@ -90,12 +144,15 @@ impl CursorTracker {
             return;
         }
 
-        // Periodic resync against the real cursor (cancels accel drift).
-        if self.last_sync.elapsed() >= RESYNC_INTERVAL {
-            if let Some((cx, cy)) = hyprland::cursor_pos() {
-                self.x = cx as f64;
-                self.y = cy as f64;
-            }
+        // Adopt the latest background sample to cancel accel drift — but never
+        // while mid-overshoot, or the resync would reset the estimate back
+        // inside the screen and the edge would never fire.
+        if self.overshoot == 0.0
+            && self.last_sync.elapsed() >= RESYNC_INTERVAL
+            && self.sampler.valid.load(Ordering::Relaxed)
+        {
+            self.x = self.sampler.x.load(Ordering::Relaxed) as f64;
+            self.y = self.sampler.y.load(Ordering::Relaxed) as f64;
             self.last_sync = Instant::now();
         }
 
@@ -152,6 +209,7 @@ impl CursorTracker {
             tracing::info!("edge {edge} reached (frac {frac:.2}) — handing control back");
             let _ = out_tx.send(Event::EdgeReached { edge, frac });
             self.active = false;
+            self.sampler.active.store(false, Ordering::Relaxed);
             self.overshoot = 0.0;
         }
     }

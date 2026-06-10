@@ -3,12 +3,93 @@
 //! Windows: controls yzendris-server.exe (tasklist/taskkill, no console flash).
 //! Linux:   controls yzendris-client via systemd user unit when installed,
 //!          falling back to direct spawn / pkill.
+//!
+//! Every call here forks a subprocess (tasklist/pgrep/systemctl/journalctl)
+//! and would block whatever thread runs it. The egui render thread must never
+//! call them directly — use `DaemonMonitor` (polls on a background thread) and
+//! the `*_async` controls (act on a background thread).
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 #[cfg(windows)]
 const SERVER_EXE: &str = "yzendris-server.exe";
 #[cfg(not(windows))]
 const CLIENT_BIN: &str = "yzendris-client";
+
+// ─── Background monitor + async controls (UI-thread-safe) ────────────────────
+
+/// Latest known daemon status, refreshed off the UI thread.
+#[derive(Clone, Default)]
+pub struct DaemonState {
+    pub running: bool,
+    pub log: String,
+}
+
+/// Polls daemon status + log on a background thread so the UI never blocks on
+/// a subprocess. The UI reads `snapshot()` each frame (cheap mutex clone).
+pub struct DaemonMonitor {
+    state: Arc<Mutex<DaemonState>>,
+}
+
+impl DaemonMonitor {
+    pub fn new() -> Self {
+        let state = Arc::new(Mutex::new(DaemonState {
+            running: false,
+            log: String::from("(consultando…)"),
+        }));
+        let shared = state.clone();
+        std::thread::Builder::new()
+            .name("yzendris-daemon-monitor".into())
+            .spawn(move || loop {
+                let running = daemon_running();
+                let log = read_log_tail(14);
+                if let Ok(mut s) = shared.lock() {
+                    *s = DaemonState { running, log };
+                }
+                std::thread::sleep(Duration::from_secs(2));
+            })
+            .ok();
+        Self { state }
+    }
+
+    pub fn snapshot(&self) -> DaemonState {
+        self.state.lock().map(|s| s.clone()).unwrap_or_default()
+    }
+}
+
+/// Start the daemon on a background thread (returns immediately).
+pub fn start_async() {
+    std::thread::spawn(|| {
+        if let Err(e) = start_daemon() {
+            tracing_warn(&format!("start_daemon: {e}"));
+        }
+    });
+}
+
+/// Stop the daemon on a background thread (returns immediately).
+pub fn stop_async() {
+    std::thread::spawn(|| {
+        let _ = stop_daemon();
+    });
+}
+
+/// Stop, wait briefly, then start — all on a background thread so the 300 ms
+/// settle never freezes the UI.
+pub fn restart_async() {
+    std::thread::spawn(|| {
+        let _ = stop_daemon();
+        std::thread::sleep(Duration::from_millis(300));
+        if let Err(e) = start_daemon() {
+            tracing_warn(&format!("restart start_daemon: {e}"));
+        }
+    });
+}
+
+/// The GUI has no tracing subscriber; surface background errors on stderr.
+fn tracing_warn(msg: &str) {
+    eprintln!("[yzendris-gui] {msg}");
+}
 
 /// Build a Command that won't flash a console window on Windows.
 fn quiet_command(program: &str) -> std::process::Command {

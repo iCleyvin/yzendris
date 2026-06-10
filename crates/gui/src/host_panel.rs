@@ -1,6 +1,6 @@
 //! Host (Windows server) configuration panel: connection settings, screen
 //! arrangement with laptop placement, TLS pairing, daemon control and log.
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use eframe::egui;
 
@@ -26,9 +26,7 @@ pub struct HostPanel {
     trusted: Vec<String>,
     new_fingerprint: String,
     status_msg: String,
-    running: bool,
-    last_poll: Instant,
-    log: String,
+    monitor: daemon::DaemonMonitor,
 }
 
 impl HostPanel {
@@ -36,28 +34,15 @@ impl HostPanel {
         let cfg = config_model::load_server_config();
         let monitors = monitors::enumerate();
         let laptop_pos = laptop_pos_from_config(&cfg, &monitors);
-        let mut panel = Self {
+        Self {
             cfg,
             monitors,
             laptop_pos,
             trusted: config_model::load_trusted_peers(),
             new_fingerprint: String::new(),
             status_msg: String::new(),
-            running: false,
-            last_poll: Instant::now() - Duration::from_secs(60),
-            log: String::new(),
-        };
-        panel.poll();
-        panel
-    }
-
-    fn poll(&mut self) {
-        if self.last_poll.elapsed() < Duration::from_secs(3) {
-            return;
+            monitor: daemon::DaemonMonitor::new(),
         }
-        self.last_poll = Instant::now();
-        self.running = daemon::daemon_running();
-        self.log = daemon::read_log_tail(14);
     }
 
     /// Apply the chosen laptop position to the config struct.
@@ -80,29 +65,24 @@ impl HostPanel {
         }
     }
 
-    fn save(&mut self) {
+    fn save(&mut self, running: bool) {
         self.sync_layout_into_cfg();
         match config_model::save_server_config(&self.cfg) {
             Ok(()) => {
-                self.status_msg = "✔ Configuración guardada".into();
-                // Apply immediately when the daemon is running.
-                if daemon::daemon_running() {
-                    let _ = daemon::stop_daemon();
-                    std::thread::sleep(Duration::from_millis(300));
-                    match daemon::start_daemon() {
-                        Ok(()) => self.status_msg = "✔ Guardado y servidor reiniciado".into(),
-                        Err(e) => self.status_msg = format!("Guardado, pero al reiniciar: {e}"),
-                    }
+                if running {
+                    // Restart happens on a background thread — UI stays responsive.
+                    daemon::restart_async();
+                    self.status_msg = "✔ Guardado, reiniciando servidor…".into();
+                } else {
+                    self.status_msg = "✔ Configuración guardada".into();
                 }
             }
             Err(e) => self.status_msg = format!("✘ Error al guardar: {e}"),
         }
-        self.last_poll = Instant::now() - Duration::from_secs(60);
-        self.poll();
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui) {
-        self.poll();
+        let status = self.monitor.snapshot();
         ui.ctx().request_repaint_after(Duration::from_secs(1));
 
         if !cfg!(windows) {
@@ -208,27 +188,21 @@ impl HostPanel {
             ui.separator();
             ui.horizontal(|ui| {
                 if ui.button("💾 Guardar configuración").clicked() {
-                    self.save();
+                    self.save(status.running);
                 }
-                if self.running {
+                if status.running {
                     if ui.button("⏹ Detener servidor").clicked() {
-                        match daemon::stop_daemon() {
-                            Ok(()) => self.status_msg = "Servidor detenido".into(),
-                            Err(e) => self.status_msg = e,
-                        }
-                        self.last_poll = Instant::now() - Duration::from_secs(60);
+                        daemon::stop_async();
+                        self.status_msg = "Deteniendo servidor…".into();
                     }
                 } else if ui.button("▶ Iniciar servidor").clicked() {
                     self.sync_layout_into_cfg();
                     let _ = config_model::save_server_config(&self.cfg);
-                    match daemon::start_daemon() {
-                        Ok(()) => self.status_msg = "Servidor iniciado".into(),
-                        Err(e) => self.status_msg = e,
-                    }
-                    self.last_poll = Instant::now() - Duration::from_secs(60);
+                    daemon::start_async();
+                    self.status_msg = "Iniciando servidor…".into();
                 }
 
-                let (dot, text) = if self.running {
+                let (dot, text) = if status.running {
                     (egui::Color32::GREEN, "en ejecución")
                 } else {
                     (egui::Color32::GRAY, "detenido")
@@ -248,7 +222,7 @@ impl HostPanel {
                     .max_height(160.0)
                     .stick_to_bottom(true)
                     .show(ui, |ui| {
-                        ui.monospace(&self.log);
+                        ui.monospace(&status.log);
                     });
             });
         });
@@ -405,9 +379,10 @@ fn draw_arrangement(ui: &mut egui::Ui, monitors: &[MonitorInfo], pos: &LaptopPos
 }
 
 fn shorten(s: &str, max: usize) -> String {
-    if s.len() <= max {
+    if s.chars().count() <= max {
         s.to_owned()
     } else {
-        format!("{}…", &s[..max])
+        // Take by chars, not bytes, so we never slice through a UTF-8 boundary.
+        format!("{}…", s.chars().take(max).collect::<String>())
     }
 }
