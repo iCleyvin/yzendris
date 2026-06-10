@@ -27,6 +27,13 @@ const RESYNC_INTERVAL: Duration = Duration::from_millis(150);
 /// How often the background thread samples the real cursor while capturing.
 const SAMPLE_INTERVAL: Duration = Duration::from_millis(70);
 
+/// After sending an `EdgeReached`, wait this long before sending another.
+/// The server replies with `CaptureEnd` only when the edge actually leads
+/// somewhere; if it doesn't (e.g. the top/bottom edge of a between-monitors
+/// laptop), we stay active and the user can push a different edge instead of
+/// getting stuck. The cooldown just avoids flooding the server meanwhile.
+const EDGE_COOLDOWN: Duration = Duration::from_millis(250);
+
 /// Shared snapshot written by the sampler thread, read by the hot path.
 #[derive(Default)]
 struct Sampler {
@@ -46,9 +53,11 @@ pub struct CursorTracker {
     /// Accumulated push past `overshoot_edge`.
     overshoot: f64,
     overshoot_edge: u8,
-    /// Only track while a capture session is active and EdgeReached unsent.
+    /// Only track while a capture session is active.
     active: bool,
     last_sync: Instant,
+    /// When we last sent an `EdgeReached` (for the resend cooldown).
+    last_edge_sent: Option<Instant>,
     sampler: Arc<Sampler>,
 }
 
@@ -80,6 +89,7 @@ impl CursorTracker {
             overshoot_edge: EDGE_RIGHT,
             active: false,
             last_sync: Instant::now(),
+            last_edge_sent: None,
             sampler,
         }
     }
@@ -103,6 +113,7 @@ impl CursorTracker {
         self.overshoot = 0.0;
         self.active = true;
         self.last_sync = Instant::now();
+        self.last_edge_sent = None;
         self.sampler.active.store(true, Ordering::Relaxed);
         tracing::debug!("tracker: capture start, rect={:?}", self.rect);
     }
@@ -195,21 +206,30 @@ impl CursorTracker {
             return;
         }
 
-        if edge != self.overshoot_edge {
-            self.overshoot = 0.0;
-            self.overshoot_edge = edge;
-        }
+        // Keep accumulating even when the dominant edge flips between axes
+        // (a diagonal push toward a corner alternates RIGHT/BOTTOM); resetting
+        // on every flip would stop the threshold from ever being reached.
+        self.overshoot_edge = edge;
         self.overshoot += excess;
 
         if self.overshoot >= OVERSHOOT_THRESHOLD {
-            let frac = match edge {
-                EDGE_LEFT | EDGE_RIGHT => ((self.y - min_y) / (max_y - min_y).max(1.0)) as f32,
-                _ => ((self.x - min_x) / (max_x - min_x).max(1.0)) as f32,
-            };
-            tracing::info!("edge {edge} reached (frac {frac:.2}) — handing control back");
-            let _ = out_tx.send(Event::EdgeReached { edge, frac });
-            self.active = false;
-            self.sampler.active.store(false, Ordering::Relaxed);
+            // Respect the resend cooldown: we keep tracking after sending so
+            // that if this edge leads nowhere (server doesn't reply with
+            // CaptureEnd) the user can still escape via another edge. Only the
+            // server's CaptureEnd actually deactivates us (on_capture_end).
+            let now = Instant::now();
+            let cooling = self
+                .last_edge_sent
+                .is_some_and(|t| now.duration_since(t) < EDGE_COOLDOWN);
+            if !cooling {
+                let frac = match edge {
+                    EDGE_LEFT | EDGE_RIGHT => ((self.y - min_y) / (max_y - min_y).max(1.0)) as f32,
+                    _ => ((self.x - min_x) / (max_x - min_x).max(1.0)) as f32,
+                };
+                tracing::info!("edge {edge} reached (frac {frac:.2}) — requesting return");
+                let _ = out_tx.send(Event::EdgeReached { edge, frac });
+                self.last_edge_sent = Some(now);
+            }
             self.overshoot = 0.0;
         }
     }

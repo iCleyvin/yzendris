@@ -605,7 +605,10 @@ pub fn release_capture_toward(edge: u8, frac: f32) {
     };
 
     let Some((tx_pos, ty_pos)) = target else {
-        // Edge leads nowhere (e.g. laptop's far edge in classic mode) — stay captured.
+        // Edge leads nowhere (e.g. the top/bottom edge of a between-monitors
+        // laptop). Stay captured; the client keeps tracking so the user can
+        // escape via an edge that does lead back to the PC.
+        tracing::debug!("EdgeReached on edge {edge} leads nowhere — staying captured");
         return;
     };
 
