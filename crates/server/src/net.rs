@@ -68,50 +68,79 @@ pub async fn run(
 }
 
 async fn handle_generic<R, W>(
-    mut reader: R,
+    reader: R,
     mut writer: W,
     event_rx: &mut mpsc::UnboundedReceiver<Event>,
     heartbeat_ms: u64,
     clipboard_enabled: bool,
 ) -> Result<()>
 where
-    R: tokio::io::AsyncRead + Unpin,
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
     W: tokio::io::AsyncWrite + Unpin,
 {
     let heartbeat_interval = time::Duration::from_millis(heartbeat_ms);
     let mut heartbeat_tick = time::interval(heartbeat_interval);
 
-    loop {
+    // Reads run in their own task: recv_event is NOT cancellation-safe, and
+    // a select! arm that loses the race drops it mid-frame, desyncing the
+    // stream (observed as EdgeReached never arriving while MouseMove events
+    // flooded the other branches).
+    let (in_tx, mut in_rx) = mpsc::unbounded_channel::<Event>();
+    let reader_task = tokio::spawn(async move {
+        let mut reader = reader;
+        loop {
+            match recv_event(&mut reader).await {
+                Ok(Some(event)) => {
+                    if in_tx.send(event).is_err() {
+                        break;
+                    }
+                }
+                Ok(None) => {
+                    info!("client closed connection");
+                    break;
+                }
+                Err(e) => {
+                    error!("recv from client: {e}");
+                    break;
+                }
+            }
+        }
+        // in_tx drops here → main loop sees the channel close.
+    });
+
+    let result: Result<()> = loop {
         tokio::select! {
             // Events from the hook thread.
             maybe = event_rx.recv() => {
                 let event = match maybe {
                     Some(e) => e,
-                    None => return Ok(()), // channel closed → shutdown
+                    None => break Ok(()), // channel closed → shutdown
                 };
 
                 // On CaptureStart, piggyback the Windows clipboard.
                 if matches!(event, Event::CaptureStart) && clipboard_enabled {
                     if let Some(text) = crate::clipboard::read() {
-                        send_event(&mut writer, &Event::ClipboardText { text })
-                            .await
-                            .context("send clipboard")?;
+                        if let Err(e) = send_event(&mut writer, &Event::ClipboardText { text }).await {
+                            break Err(e).context("send clipboard");
+                        }
                     }
                 }
 
-                send_event(&mut writer, &event).await.context("send_event")?;
+                if let Err(e) = send_event(&mut writer, &event).await {
+                    break Err(e).context("send_event");
+                }
             }
 
             // Heartbeat tick.
             _ = heartbeat_tick.tick() => {
-                send_event(&mut writer, &Event::Heartbeat)
-                    .await
-                    .context("heartbeat send")?;
+                if let Err(e) = send_event(&mut writer, &Event::Heartbeat).await {
+                    break Err(e).context("heartbeat send");
+                }
             }
 
-            // Inbound from client (heartbeat echo, clipboard reply).
-            result = recv_event(&mut reader) => {
-                match result.context("recv from client")? {
+            // Inbound from client (heartbeat echo, clipboard, EdgeReached).
+            inbound = in_rx.recv() => {
+                match inbound {
                     Some(Event::Heartbeat) => { /* echo — all good */ }
                     Some(Event::ClipboardText { text }) => {
                         if clipboard_enabled {
@@ -125,12 +154,12 @@ where
                         crate::hook::release_capture_toward(edge, frac);
                     }
                     Some(_) => { /* unexpected — ignore */ }
-                    None => {
-                        info!("client closed connection");
-                        return Ok(());
-                    }
+                    None => break Ok(()), // reader task ended (EOF or error)
                 }
             }
         }
-    }
+    };
+
+    reader_task.abort();
+    result
 }

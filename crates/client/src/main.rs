@@ -147,10 +147,12 @@ fn main() {
 
 #[cfg(target_os = "linux")]
 async fn async_main() -> Result<()> {
+    // RUST_LOG wins when set (e.g. RUST_LOG=yzendris_client=debug); the
+    // info default only applies when the variable is absent.
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("yzendris_client=info".parse().unwrap()),
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("yzendris_client=info")),
         )
         .init();
 
