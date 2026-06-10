@@ -8,6 +8,7 @@
 [CmdletBinding()]
 param(
     [string]$BinaryPath = ".\target\release\yzendris-server.exe",
+    [string]$GuiPath    = ".\target\release\yzendris-gui.exe",
     [int]   $Port       = 7547
 )
 
@@ -17,10 +18,30 @@ $ErrorActionPreference = "Stop"
 # Use %APPDATA%\yzendris so config and binary live together.
 $InstallDir = "$env:APPDATA\yzendris"
 $Dest       = "$InstallDir\yzendris-server.exe"
+$GuiDest    = "$InstallDir\yzendris-gui.exe"
 
 New-Item -ItemType Directory -Force $InstallDir | Out-Null
 Copy-Item -Force $BinaryPath $Dest
 Write-Host "✓ installed $Dest"
+
+if (Test-Path $GuiPath) {
+    Copy-Item -Force $GuiPath $GuiDest
+    Write-Host "✓ installed $GuiDest"
+
+    # Start Menu shortcut for the GUI.
+    $StartMenu  = [Environment]::GetFolderPath("Programs")
+    $GuiLnk     = "$StartMenu\Yzendris KVM.lnk"
+    $WshGui     = New-Object -ComObject WScript.Shell
+    $LnkGui     = $WshGui.CreateShortcut($GuiLnk)
+    $LnkGui.TargetPath       = $GuiDest
+    $LnkGui.WorkingDirectory = $InstallDir
+    $LnkGui.IconLocation     = "$GuiDest, 0"
+    $LnkGui.Description      = "Yzendris KVM configurator"
+    $LnkGui.Save()
+    Write-Host "✓ start menu shortcut: $GuiLnk"
+} else {
+    Write-Host "  (GUI not found at $GuiPath — build with: cargo build --release -p yzendris-gui)"
+}
 
 # ── 2. Default config ─────────────────────────────────────────────────────────
 $CfgFile = "$InstallDir\server.toml"

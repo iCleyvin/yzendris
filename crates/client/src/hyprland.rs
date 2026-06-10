@@ -91,6 +91,63 @@ pub fn detect_layout() -> String {
     "us".to_owned()
 }
 
+/// Run `hyprctl` with the instance signature injected; return stdout on success.
+fn hyprctl(args: &[&str]) -> Option<String> {
+    let sig = instance_signature()?;
+    let output = std::process::Command::new("hyprctl")
+        .args(args)
+        .env("HYPRLAND_INSTANCE_SIGNATURE", &sig)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Current cursor position in global (layout) coordinates.
+/// `hyprctl cursorpos` prints "x, y".
+pub fn cursor_pos() -> Option<(i32, i32)> {
+    let out = hyprctl(&["cursorpos"])?;
+    let mut parts = out.trim().split(',');
+    let x = parts.next()?.trim().parse().ok()?;
+    let y = parts.next()?.trim().parse().ok()?;
+    Some((x, y))
+}
+
+/// Geometry of the focused monitor in global LOGICAL coordinates:
+/// (x, y, width, height). Accounts for scale and 90°/270° transforms.
+pub fn focused_monitor_rect() -> Option<(i32, i32, i32, i32)> {
+    let out = hyprctl(&["monitors", "-j"])?;
+    let json: serde_json::Value = serde_json::from_str(&out).ok()?;
+    let mons = json.as_array()?;
+    let mon = mons
+        .iter()
+        .find(|m| m["focused"].as_bool() == Some(true))
+        .or_else(|| mons.first())?;
+
+    let x = mon["x"].as_i64()? as i32;
+    let y = mon["y"].as_i64()? as i32;
+    let mut w = mon["width"].as_i64()? as f64;
+    let mut h = mon["height"].as_i64()? as f64;
+    let scale = mon["scale"].as_f64().unwrap_or(1.0).max(0.1);
+    // Odd transforms (1, 3, 5, 7) are rotated 90°/270° — swap dimensions.
+    if mon["transform"].as_i64().unwrap_or(0) % 2 == 1 {
+        std::mem::swap(&mut w, &mut h);
+    }
+    Some((x, y, (w / scale).round() as i32, (h / scale).round() as i32))
+}
+
+/// Warp the cursor to global coordinates (used when the mouse enters from
+/// the Windows side so it appears at the matching edge).
+pub fn move_cursor(x: i32, y: i32) {
+    let xs = x.to_string();
+    let ys = y.to_string();
+    if hyprctl(&["dispatch", "movecursor", &xs, &ys]).is_none() {
+        tracing::warn!("hyprctl dispatch movecursor failed");
+    }
+}
+
 /// Tell Hyprland to assign `layout` to the virtual uinput device `device_name`
 /// at runtime (no config file is touched).
 ///

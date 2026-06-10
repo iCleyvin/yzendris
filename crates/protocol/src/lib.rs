@@ -29,7 +29,23 @@ pub enum Event {
     ///   Server→Client on CaptureStart  (Windows clipboard → Linux)
     ///   Client→Server on CaptureEnd    (Linux clipboard → Windows)
     ClipboardText { text: String },
+    /// Server→Client right after CaptureStart: warp the client cursor to the
+    /// screen edge the mouse came in through. `edge` is the client-screen edge
+    /// (cursor appears AT this edge): 0=right 1=left 2=bottom 3=top.
+    /// `frac` is the position along that edge (0.0–1.0).
+    EnterAt { edge: u8, frac: f32 },
+    /// Client→Server: the client cursor pushed past this edge of its screen —
+    /// the server should release capture and place the Windows cursor on the
+    /// matching side. Same edge encoding as `EnterAt`. `frac` is the position
+    /// along the edge so the server can place the cursor at the same height.
+    EdgeReached { edge: u8, frac: f32 },
 }
+
+/// Edge encoding shared by `EnterAt` / `EdgeReached`.
+pub const EDGE_RIGHT: u8 = 0;
+pub const EDGE_LEFT: u8 = 1;
+pub const EDGE_BOTTOM: u8 = 2;
+pub const EDGE_TOP: u8 = 3;
 
 // ─── Framing: 4-byte LE length prefix + bincode payload ──────────────────────
 

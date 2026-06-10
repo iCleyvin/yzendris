@@ -126,7 +126,9 @@ impl VirtualKbdMouse {
             Event::CaptureStart
             | Event::CaptureEnd
             | Event::Heartbeat
-            | Event::ClipboardText { .. } => {
+            | Event::ClipboardText { .. }
+            | Event::EnterAt { .. }
+            | Event::EdgeReached { .. } => {
                 return Ok(false);
             }
         };

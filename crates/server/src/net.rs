@@ -119,6 +119,11 @@ where
                             crate::clipboard::write(&text);
                         }
                     }
+                    Some(Event::EdgeReached { edge, frac }) => {
+                        // Client cursor pushed past its screen edge — hand
+                        // control back on the matching Windows side.
+                        crate::hook::release_capture_toward(edge, frac);
+                    }
                     Some(_) => { /* unexpected — ignore */ }
                     None => {
                         info!("client closed connection");
