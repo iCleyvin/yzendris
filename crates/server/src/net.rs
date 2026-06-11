@@ -29,6 +29,12 @@ pub async fn run(
             }
             Ok(stream) => {
                 backoff_ms = 1000;
+                // Disable Nagle: mouse moves are tiny one-per-event frames, and
+                // Nagle would hold them up to ~40ms waiting to coalesce, which
+                // shows up as choppy/laggy cursor motion on the client.
+                if let Err(e) = stream.set_nodelay(true) {
+                    warn!("[client {client}] set_nodelay failed: {e}");
+                }
                 info!("[client {client}] TCP connected to {addr}");
 
                 let result = if let Some(ref connector) = tls_connector {

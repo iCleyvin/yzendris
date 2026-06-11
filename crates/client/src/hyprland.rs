@@ -272,6 +272,43 @@ pub fn apply_layout(device_name: &str, layout: &str) -> Result<()> {
     Ok(())
 }
 
+/// Put the virtual pointer into a *flat* acceleration profile with neutral
+/// sensitivity so libinput passes our deltas through 1:1.
+///
+/// The host already sends deltas derived from the Windows cursor, which has
+/// had Windows pointer acceleration ("enhance pointer precision") applied.
+/// If libinput then applies its own accel curve on top, the two non-linear
+/// curves stack and the cursor feels erratic/non-linear. Flat profile removes
+/// libinput's curve so motion matches the host 1:1.
+pub fn apply_pointer_settings(device_name: &str) {
+    // Classic runtime keywords.
+    let classic = || {
+        let a = format!("device:{device_name}:accel_profile");
+        let s = format!("device:{device_name}:sensitivity");
+        let ok_a = hyprctl_ok(&["-r", "keyword", &a, "flat"]);
+        let ok_s = hyprctl_ok(&["-r", "keyword", &s, "0"]);
+        ok_a && ok_s
+    };
+    // Lua (v2) config API form.
+    let lua = || {
+        let expr = format!(
+            "hl.device({{ name = '{device_name}', accel_profile = 'flat', sensitivity = 0 }})"
+        );
+        hyprctl_ok(&["eval", &expr])
+    };
+
+    let ok = match LUA_MODE.get() {
+        Some(false) => classic(),
+        Some(true) => lua(),
+        None => classic() || lua(),
+    };
+    if ok {
+        tracing::info!("pointer set to flat accel on '{device_name}'");
+    } else {
+        tracing::warn!("could not set flat accel on '{device_name}' — cursor may feel non-linear");
+    }
+}
+
 /// Layout that Hyprland currently reports for `device_name`, if visible.
 fn device_layout(device_name: &str) -> Option<String> {
     let out = hyprctl(&["devices", "-j"])?;

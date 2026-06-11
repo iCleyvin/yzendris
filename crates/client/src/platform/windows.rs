@@ -16,7 +16,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT,
     KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, MOUSEINPUT, MOUSEEVENTF_HWHEEL,
     MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP,
-    MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL,
+    MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL,
     MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, VIRTUAL_KEY,
 };
 use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, SetCursorPos};
@@ -160,7 +160,15 @@ impl Injector {
                 }
             }
             Event::MouseMove { dx, dy } => {
-                send(&[mouse_input(*dx, *dy, 0, MOUSEEVENTF_MOVE)]);
+                // SendInput relative MOVE is subject to the laptop's mouse-speed
+                // slider AND "enhance pointer precision" accel, which re-
+                // accelerates the host's already-accelerated deltas — the cursor
+                // ends up feeling erratic/non-linear. SetCursorPos moves by exact
+                // pixels with no accel, so motion matches the host 1:1 (and makes
+                // the edge tracker's cursor_pos reads exact).
+                if let Some((cx, cy)) = cursor_pos() {
+                    move_cursor(cx + dx, cy + dy);
+                }
             }
             Event::MouseButton { btn, pressed } => {
                 if let Some((down, up, xdata)) = evdev_button(*btn) {

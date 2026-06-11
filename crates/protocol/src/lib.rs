@@ -59,8 +59,14 @@ const MAX_FRAME: u32 = 65536;
 pub async fn send_event<W: AsyncWrite + Unpin>(writer: &mut W, event: &Event) -> anyhow::Result<()> {
     let payload = bincode::serialize(event).context("bincode serialize")?;
     let len = payload.len() as u32;
-    writer.write_u32_le(len).await.context("write len")?;
-    writer.write_all(&payload).await.context("write payload")?;
+    // One buffer → one write: length prefix and payload go out as a single
+    // TCP segment (and single TLS record), so a high-frequency mouse stream
+    // doesn't pay two syscalls per event nor risk the prefix and body landing
+    // in separate, separately-delayed packets.
+    let mut frame = Vec::with_capacity(4 + payload.len());
+    frame.extend_from_slice(&len.to_le_bytes());
+    frame.extend_from_slice(&payload);
+    writer.write_all(&frame).await.context("write frame")?;
     Ok(())
 }
 
