@@ -472,13 +472,22 @@ fn arrangement_editor(
 
     let avg_w = monitors.iter().map(|m| m.width()).sum::<i32>() as f32 / monitors.len() as f32;
     let avg_h = monitors.iter().map(|m| m.height()).sum::<i32>() as f32 / monitors.len() as f32;
-    let badge_w = (avg_w * 0.55).max(280.0);
-    let badge_h = (avg_h * 0.30).max(140.0);
-    let pad = (avg_w * 0.05).max(35.0);
-    let gap_w = badge_w + 2.0 * pad;
-    let gap_h = badge_h + 2.0 * pad;
-    let off_x = badge_w * 0.5 + pad;
-    let off_y = badge_h * 0.5 + pad;
+    let pad = (avg_w * 0.06).max(40.0);
+
+    // Each client badge is drawn at its REAL resolution (same scale as the
+    // monitors) so the picture is proportional. Unknown → a default size.
+    let bsizes: Vec<egui::Vec2> = (0..clients.len())
+        .map(|ci| match client_res.get(&ci) {
+            Some((w, h)) if *w > 0 && *h > 0 => egui::vec2(*w as f32, *h as f32),
+            _ => egui::vec2(avg_w * 0.8, avg_h * 0.8),
+        })
+        .collect();
+    let max_bw = bsizes.iter().map(|s| s.x).fold(avg_w * 0.8, f32::max);
+    let max_bh = bsizes.iter().map(|s| s.y).fold(avg_h * 0.8, f32::max);
+    let gap_w = max_bw + 2.0 * pad;
+    let gap_h = max_bh + 2.0 * pad;
+    let off_x = max_bw * 0.5 + pad;
+    let off_y = max_bh * 0.5 + pad;
 
     // Monitor rects, "exploded": a real gap is inserted at every adjacency so
     // clients sit cleanly in the gaps. `mon[idx]` stays aligned with `monitors`.
@@ -561,7 +570,7 @@ fn arrangement_editor(
     // Virtual area: monitors + all slot badges.
     let mut total = mon.iter().copied().reduce(|a, b| a.union(b)).unwrap();
     for (_, p) in &cands {
-        total = total.union(egui::Rect::from_center_size(*p, egui::vec2(badge_w, badge_h)));
+        total = total.union(egui::Rect::from_center_size(*p, egui::vec2(max_bw, max_bh)));
     }
     total = total.expand(avg_w * 0.03);
 
@@ -588,13 +597,13 @@ fn arrangement_editor(
             .unwrap_or(0)
     };
 
-    let badge_screen = egui::vec2(badge_w * scale, badge_h * scale);
-
     // ── Clients first (they sit on top) ──────────────────────────────────────
     let mut client_busy = false;
     let mut client_changed = false;
-    let mut client_draws: Vec<(egui::Pos2, String, bool)> = Vec::new();
+    let mut client_draws: Vec<(egui::Pos2, egui::Vec2, String, bool)> = Vec::new();
     for (ci, client) in clients.iter_mut().enumerate() {
+        // Drawn at the client's real resolution (same scale as the monitors).
+        let badge_screen = bsizes[ci] * scale;
         let cur = client_placement(client, monitors);
         let slot = cands
             .iter()
@@ -634,7 +643,7 @@ fn arrangement_editor(
             Some((w, h)) => format!("{}\n{}×{}", client.name, w, h),
             None => client.name.clone(),
         };
-        client_draws.push((draw_center, label, r.dragged()));
+        client_draws.push((draw_center, badge_screen, label, r.dragged()));
     }
 
     // ── Monitors (draggable to relocate in Windows) ──────────────────────────
@@ -683,8 +692,8 @@ fn arrangement_editor(
         );
     }
     // Client badges.
-    for (center, name, dragging) in &client_draws {
-        let br = egui::Rect::from_center_size(*center, badge_screen);
+    for (center, badge_screen, name, dragging) in &client_draws {
+        let br = egui::Rect::from_center_size(*center, *badge_screen);
         let (fill, stroke) = if *dragging {
             (egui::Color32::from_rgb(45, 140, 85), egui::Color32::from_rgb(150, 250, 190))
         } else {
