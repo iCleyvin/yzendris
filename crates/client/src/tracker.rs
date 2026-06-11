@@ -213,6 +213,17 @@ impl CursorTracker {
         self.overshoot += excess;
 
         if self.overshoot >= OVERSHOOT_THRESHOLD {
+            // While a game holds the pointer for camera/character motion (cursor
+            // hidden / relative-motion mode), never hand control back to the
+            // host: the user is steering, not trying to leave. Edge hand-off
+            // resumes the moment the game releases the pointer (pause/menu →
+            // cursor visible again). Checked only here (when actually pushing an
+            // edge), so it's not in the per-move hot path.
+            if crate::platform::pointer_locked() {
+                self.overshoot = 0.0;
+                return;
+            }
+
             // Respect the resend cooldown: we keep tracking after sending so
             // that if this edge leads nowhere (server doesn't reply with
             // CaptureEnd) the user can still escape via another edge. Only the
