@@ -11,7 +11,7 @@
 /// atomics and OnceLock are the only shared state; no raw pointers escape.
 
 use std::sync::{
-    atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering},
+    atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, AtomicUsize, Ordering},
     OnceLock,
 };
 
@@ -35,18 +35,33 @@ use windows::Win32::{
 
 // ─── Globals ─────────────────────────────────────────────────────────────────
 
-/// Channel to the async runtime.
-static EVENT_TX: OnceLock<UnboundedSender<Event>> = OnceLock::new();
+/// One channel to the async runtime per client (indexed by client id).
+static EVENT_TXS: OnceLock<Vec<UnboundedSender<Event>>> = OnceLock::new();
 
-/// Whether we are currently routing input to the Linux client.
+/// Whether we are currently routing input to a client.
 pub static CAPTURING: AtomicBool = AtomicBool::new(false);
 
-/// Whether a client TCP connection is currently live.
-/// Edge detection only triggers capture when this is true.
-pub static CLIENT_CONNECTED: AtomicBool = AtomicBool::new(false);
+/// Which client currently holds capture (valid only while CAPTURING).
+static ACTIVE_CLIENT: AtomicUsize = AtomicUsize::new(0);
 
-pub fn set_client_connected(val: bool) {
-    CLIENT_CONNECTED.store(val, Ordering::Relaxed);
+/// Bitmask of clients with a live TCP connection (bit k = client k).
+/// Edge detection only triggers capture for a connected client.
+static CLIENT_CONNECTED_MASK: AtomicU64 = AtomicU64::new(0);
+
+pub fn set_client_connected(client: usize, val: bool) {
+    if client >= 64 {
+        return;
+    }
+    let bit = 1u64 << client;
+    if val {
+        CLIENT_CONNECTED_MASK.fetch_or(bit, Ordering::Relaxed);
+    } else {
+        CLIENT_CONNECTED_MASK.fetch_and(!bit, Ordering::Relaxed);
+    }
+}
+
+fn client_connected(client: usize) -> bool {
+    client < 64 && CLIENT_CONNECTED_MASK.load(Ordering::Relaxed) & (1u64 << client) != 0
 }
 
 /// Win32 thread ID of the hook thread (used to post WM_QUIT for shutdown).
@@ -121,9 +136,9 @@ fn held_key_is_set(code: u16) -> bool {
 
 // ─── Public API ──────────────────────────────────────────────────────────────
 
-/// Initialise the event sender.  Must be called before `start`.
-pub fn init(sender: UnboundedSender<Event>) {
-    EVENT_TX.set(sender).ok();
+/// Initialise the per-client event senders.  Must be called before `start`.
+pub fn init(senders: Vec<UnboundedSender<Event>>) {
+    EVENT_TXS.set(senders).ok();
 }
 
 /// Set the "park position" for the captured mouse cursor.
@@ -132,9 +147,16 @@ pub fn set_capture_center(x: i32, y: i32) {
     CAPTURE_CENTER_Y.store(y, Ordering::Relaxed);
 }
 
-/// Install the screen layout. Must be called once before `start`.
-pub fn configure_layout(layout: Layout) {
-    LAYOUT.set(layout).ok();
+/// A client and the layout/boundary it occupies in the host's screen space.
+#[derive(Debug, Clone, Copy)]
+pub struct Portal {
+    pub client: usize,
+    pub layout: Layout,
+}
+
+/// Install all client portals. Must be called once before `start`.
+pub fn configure_portals(portals: Vec<Portal>) {
+    PORTALS.set(portals).ok();
 }
 
 /// Spawn the Win32 hook thread.  Returns immediately.
@@ -142,11 +164,10 @@ pub fn start() {
     std::thread::spawn(hook_thread);
 }
 
-/// Called from the network layer when the TCP connection drops.
-/// Safely exits capture from any thread (ShowCursor / SetCursorPos are
-/// thread-safe Win32 calls).
-pub fn release_capture_on_disconnect() {
-    if !CAPTURING.load(Ordering::Relaxed) {
+/// Called from the network layer when a client's TCP connection drops.
+/// Only releases capture if that client was the one holding it.
+pub fn release_capture_on_disconnect(client: usize) {
+    if !CAPTURING.load(Ordering::Relaxed) || ACTIVE_CLIENT.load(Ordering::Relaxed) != client {
         return;
     }
     held_keys_clear();
@@ -211,7 +232,13 @@ pub enum Layout {
     Stacked { top: Rect, bottom: Rect, boundary_y: i32 },
 }
 
-static LAYOUT: OnceLock<Layout> = OnceLock::new();
+static PORTALS: OnceLock<Vec<Portal>> = OnceLock::new();
+
+/// Layout of the client that currently holds capture (its portal's layout).
+fn active_layout() -> Option<Layout> {
+    let id = ACTIVE_CLIENT.load(Ordering::Relaxed);
+    PORTALS.get()?.iter().find(|p| p.client == id).map(|p| p.layout)
+}
 
 /// Pixels we inset the cursor from the boundary/edge when handing control
 /// back, so the very next mouse move doesn't instantly re-trigger capture.
@@ -271,8 +298,18 @@ fn hook_thread() {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
+/// Send to a specific client's channel.
+fn send_to(client: usize, event: Event) {
+    if let Some(txs) = EVENT_TXS.get() {
+        if let Some(tx) = txs.get(client) {
+            let _ = tx.send(event);
+        }
+    }
+}
+
+/// Send to whichever client currently holds capture.
 fn send(event: Event) {
-    if let Some(tx) = EVENT_TX.get() { let _ = tx.send(event); }
+    send_to(ACTIVE_CLIENT.load(Ordering::Relaxed), event);
 }
 
 /// AT scan-code set 1 → evdev keycode.
@@ -472,17 +509,19 @@ fn frac_of(v: i32, lo: i32, hi: i32) -> f32 {
     ((v - lo) as f32 / (hi - lo) as f32).clamp(0.0, 1.0)
 }
 
-/// Returns `true` when this move entered capture (caller should swallow it).
-#[cfg(windows)]
-unsafe fn check_edge_and_enter(x: i32, y: i32) -> bool {
-    use yzendris_protocol::{EDGE_LEFT, EDGE_RIGHT};
-
-    let connected = CLIENT_CONNECTED.load(Ordering::Relaxed);
-    let Some(layout) = LAYOUT.get() else { return false };
-
+/// Pure geometry: does moving from (px,py) to (x,y) cross into this layout's
+/// client? Returns (client entry edge, frac along it, came_from side).
+fn crossing_for(
+    layout: &Layout,
+    prev_valid: bool,
+    px: i32,
+    py: i32,
+    x: i32,
+    y: i32,
+) -> Option<(u8, f32, u32)> {
+    use yzendris_protocol::{EDGE_BOTTOM, EDGE_LEFT, EDGE_RIGHT, EDGE_TOP};
     match *layout {
         Layout::Edge { side, screen } => {
-            set_prev(x, y);
             let at_edge = match side {
                 0 => x >= screen.right - 1,
                 1 => x <= screen.left,
@@ -490,88 +529,89 @@ unsafe fn check_edge_and_enter(x: i32, y: i32) -> bool {
                 3 => y <= screen.top,
                 _ => false,
             };
-            if at_edge && connected {
-                // Client entry edge is the opposite of ours; frac maps the
-                // cursor position along the shared edge.
-                let (client_edge, frac) = match side {
-                    0 => (EDGE_LEFT, frac_of(y, screen.top, screen.bottom)),
-                    1 => (EDGE_RIGHT, frac_of(y, screen.top, screen.bottom)),
-                    2 => (yzendris_protocol::EDGE_TOP, frac_of(x, screen.left, screen.right)),
-                    _ => (yzendris_protocol::EDGE_BOTTOM, frac_of(x, screen.left, screen.right)),
-                };
-                tracing::debug!("edge hit: x={x} y={y} side={side} — entering capture");
-                enter_capture(client_edge, frac, 0);
-                return true;
+            if !at_edge {
+                return None;
             }
-            false
+            Some(match side {
+                0 => (EDGE_LEFT, frac_of(y, screen.top, screen.bottom), 0),
+                1 => (EDGE_RIGHT, frac_of(y, screen.top, screen.bottom), 0),
+                2 => (EDGE_TOP, frac_of(x, screen.left, screen.right), 0),
+                _ => (EDGE_BOTTOM, frac_of(x, screen.left, screen.right), 0),
+            })
         }
         Layout::SideBySide { left, right, boundary_x } => {
-            let prev_valid = PREV_VALID.load(Ordering::Relaxed);
-            let px = PREV_X.load(Ordering::Relaxed);
-            set_prev(x, y);
-            if !prev_valid || !connected {
-                return false;
+            if !prev_valid {
+                return None;
             }
-            // The laptop only bridges the band the two monitors share
-            // vertically. Crossing OUTSIDE that band (a height where one
-            // monitor is taller) passes straight monitor→monitor.
             let band_top = left.top.max(right.top);
             let band_bottom = left.bottom.min(right.bottom);
-            let in_band = y >= band_top && y < band_bottom;
-
-            if px < boundary_x && x >= boundary_x && in_band {
-                let frac = frac_of(y, band_top, band_bottom);
-                tracing::debug!("boundary cross L→R at y={y} — entering capture");
-                enter_capture(EDGE_LEFT, frac, 0);
-                return true;
+            if !(y >= band_top && y < band_bottom) {
+                return None;
             }
-            if px >= boundary_x && x < boundary_x && in_band {
-                let frac = frac_of(y, band_top, band_bottom);
-                tracing::debug!("boundary cross R→L at y={y} — entering capture");
-                enter_capture(EDGE_RIGHT, frac, 1);
-                return true;
+            if px < boundary_x && x >= boundary_x {
+                Some((EDGE_LEFT, frac_of(y, band_top, band_bottom), 0))
+            } else if px >= boundary_x && x < boundary_x {
+                Some((EDGE_RIGHT, frac_of(y, band_top, band_bottom), 1))
+            } else {
+                None
             }
-            false
         }
         Layout::Stacked { top, bottom, boundary_y } => {
-            use yzendris_protocol::{EDGE_BOTTOM, EDGE_TOP};
-            let prev_valid = PREV_VALID.load(Ordering::Relaxed);
-            let py = PREV_Y.load(Ordering::Relaxed);
-            set_prev(x, y);
-            if !prev_valid || !connected {
-                return false;
+            if !prev_valid {
+                return None;
             }
-            // Bridge only the band the two monitors share horizontally.
             let band_left = top.left.max(bottom.left);
             let band_right = top.right.min(bottom.right);
-            let in_band = x >= band_left && x < band_right;
-
-            if py < boundary_y && y >= boundary_y && in_band {
-                // Crossing top monitor → bottom monitor: enter laptop's TOP edge.
-                let frac = frac_of(x, band_left, band_right);
-                tracing::debug!("boundary cross T→B at x={x} — entering capture");
-                enter_capture(EDGE_TOP, frac, 0);
-                return true;
+            if !(x >= band_left && x < band_right) {
+                return None;
             }
-            if py >= boundary_y && y < boundary_y && in_band {
-                // Crossing bottom monitor → top monitor: enter laptop's BOTTOM edge.
-                let frac = frac_of(x, band_left, band_right);
-                tracing::debug!("boundary cross B→T at x={x} — entering capture");
-                enter_capture(EDGE_BOTTOM, frac, 1);
-                return true;
+            if py < boundary_y && y >= boundary_y {
+                Some((EDGE_TOP, frac_of(x, band_left, band_right), 0))
+            } else if py >= boundary_y && y < boundary_y {
+                Some((EDGE_BOTTOM, frac_of(x, band_left, band_right), 1))
+            } else {
+                None
             }
-            false
         }
     }
 }
 
+/// Returns `true` when this move entered capture (caller should swallow it).
+/// Checks every connected client's portal and enters the first one crossed.
 #[cfg(windows)]
-unsafe fn enter_capture(client_edge: u8, frac: f32, came_from: u32) {
+unsafe fn check_edge_and_enter(x: i32, y: i32) -> bool {
+    let Some(portals) = PORTALS.get() else {
+        set_prev(x, y);
+        return false;
+    };
+    let prev_valid = PREV_VALID.load(Ordering::Relaxed);
+    let px = PREV_X.load(Ordering::Relaxed);
+    let py = PREV_Y.load(Ordering::Relaxed);
+
+    let mut entered = false;
+    for portal in portals {
+        if !client_connected(portal.client) {
+            continue;
+        }
+        if let Some((edge, frac, came_from)) = crossing_for(&portal.layout, prev_valid, px, py, x, y) {
+            tracing::debug!("client {} portal crossed — entering capture", portal.client);
+            enter_capture(portal.client, edge, frac, came_from);
+            entered = true;
+            break;
+        }
+    }
+    set_prev(x, y);
+    entered
+}
+
+#[cfg(windows)]
+unsafe fn enter_capture(client: usize, client_edge: u8, frac: f32, came_from: u32) {
     held_keys_clear();
     CTRL_DOWN.store(false,  Ordering::Relaxed);
     SHIFT_DOWN.store(false, Ordering::Relaxed);
     ALT_DOWN.store(false,   Ordering::Relaxed);
     CAME_FROM.store(came_from, Ordering::Relaxed);
+    ACTIVE_CLIENT.store(client, Ordering::Relaxed);
     CAPTURING.store(true, Ordering::Relaxed);
 
     let cx = CAPTURE_CENTER_X.load(Ordering::Relaxed);
@@ -581,24 +621,25 @@ unsafe fn enter_capture(client_edge: u8, frac: f32, came_from: u32) {
     let _ = SetCursorPos(cx, cy);
     RESETTING_CURSOR.store(false, Ordering::Relaxed);
 
-    send(Event::CaptureStart);
-    send(Event::EnterAt { edge: client_edge, frac });
-    info!("capture started (client enters edge {client_edge} at {frac:.2})");
+    send_to(client, Event::CaptureStart);
+    send_to(client, Event::EnterAt { edge: client_edge, frac });
+    info!("capture started (client {client} enters edge {client_edge} at {frac:.2})");
 }
 
 /// Called from the network task when the client reports its cursor pushed
 /// past an edge of its screen (`Event::EdgeReached`): release capture and
 /// place the Windows cursor on the matching side.
-pub fn release_capture_toward(edge: u8, frac: f32) {
+pub fn release_capture_toward(client: usize, edge: u8, frac: f32) {
     use yzendris_protocol::{EDGE_BOTTOM, EDGE_LEFT, EDGE_RIGHT, EDGE_TOP};
 
-    if !CAPTURING.load(Ordering::Relaxed) {
+    // Only the client currently holding capture may hand it back.
+    if !CAPTURING.load(Ordering::Relaxed) || ACTIVE_CLIENT.load(Ordering::Relaxed) != client {
         return;
     }
-    let Some(layout) = LAYOUT.get() else { return };
+    let Some(layout) = active_layout() else { return };
 
     // Work out where the cursor should reappear on the Windows desktop.
-    let target: Option<(i32, i32)> = match *layout {
+    let target: Option<(i32, i32)> = match layout {
         Layout::SideBySide { left, right, boundary_x } => {
             // `frac` is relative to the shared vertical band (same basis as
             // capture entry), so map it back through that band.
@@ -702,7 +743,7 @@ unsafe fn exit_capture() {
     // Release combo = "bring the cursor back here". In Between mode return to
     // the centre of the monitor the cursor came from; otherwise the park centre.
     let came_from = CAME_FROM.load(Ordering::Relaxed);
-    let (cx, cy) = match LAYOUT.get() {
+    let (cx, cy) = match active_layout() {
         Some(Layout::SideBySide { left, right, .. }) => {
             let m = if came_from == 0 { left } else { right };
             ((m.left + m.right) / 2, (m.top + m.bottom) / 2)

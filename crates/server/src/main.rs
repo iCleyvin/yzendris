@@ -74,6 +74,36 @@ struct Config {
     /// When absent or mode="edge", the classic `edge` setting applies.
     #[serde(default)]
     layout: Option<LayoutConfig>,
+
+    /// Multiple clients, each at its own boundary/edge. When non-empty this
+    /// takes over from the single-client fields above (which stay for backward
+    /// compatibility with existing configs).
+    #[serde(default)]
+    clients: Vec<ClientCfg>,
+}
+
+#[cfg(windows)]
+#[derive(Deserialize, Debug, Clone)]
+struct ClientCfg {
+    /// Friendly name for logs.
+    #[serde(default)]
+    name: String,
+    /// IP or hostname of the client.
+    addr: String,
+    /// Port the client listens on.
+    #[serde(default = "default_port")]
+    port: u16,
+    /// Use TLS for this client.
+    #[serde(default)]
+    tls: bool,
+    /// Placement: the two monitor names the client sits between. Orientation
+    /// (side by side / stacked) is inferred from their geometry.
+    #[serde(default)]
+    between: Option<Vec<String>>,
+    /// Placement: an outer edge of the desktop ("right"/"left"/"top"/"bottom").
+    /// Used when `between` is absent.
+    #[serde(default)]
+    edge: Option<String>,
 }
 
 #[cfg(windows)]
@@ -115,6 +145,7 @@ impl Default for Config {
             clipboard:    default_clipboard(),
             tls:          false,
             layout:       None,
+            clients:      Vec::new(),
         }
     }
 }
@@ -196,54 +227,116 @@ async fn async_main() -> Result<()> {
     let config = load_config(config_path)?;
     info!("config: {config:?}");
 
-    // Resolve the screen layout (classic edge or laptop-between-monitors).
-    let layout = build_layout(&config);
-    info!("layout: {layout:?}");
+    // Resolve the client list (multi-client config, or the legacy single client).
+    let clients = resolve_clients(&config);
+    if clients.is_empty() {
+        anyhow::bail!("no clients configured");
+    }
+    for c in &clients {
+        info!("client {} '{}' @ {} — portal {:?}", c.id, c.name, c.addr, c.layout);
+    }
 
     // Park the captured cursor at the centre of the virtual screen.
     let vs = edge::virtual_screen();
     hook::set_capture_center((vs.left + vs.right) / 2, (vs.top + vs.bottom) / 2);
-    hook::configure_layout(layout);
 
-    // Create channel: hook → net.
-    let (event_tx, event_rx) =
-        tokio::sync::mpsc::unbounded_channel::<yzendris_protocol::Event>();
-    hook::init(event_tx);
+    // One portal per client, one channel per client.
+    let portals = clients
+        .iter()
+        .map(|c| hook::Portal { client: c.id, layout: c.layout })
+        .collect();
+    hook::configure_portals(portals);
+
+    let mut senders = Vec::with_capacity(clients.len());
+    let mut receivers = Vec::with_capacity(clients.len());
+    for _ in &clients {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<yzendris_protocol::Event>();
+        senders.push(tx);
+        receivers.push(rx);
+    }
+    hook::init(senders);
 
     // Start the Win32 hook thread.
     hook::start();
     info!("hooks installed");
 
-    // Build optional TLS connector.
-    let tls_connector = if config.tls {
-        // Path to trusted fingerprints file: same dir as the config or %APPDATA%\yzendris\
+    // Build one TLS connector (shared) if any client uses TLS.
+    let tls_connector = if clients.iter().any(|c| c.tls) {
         let trusted_path = std::env::var_os("APPDATA")
             .map(|d| std::path::PathBuf::from(d).join("yzendris").join("trusted_peers.txt"))
             .unwrap_or_else(|| std::path::PathBuf::from("trusted_peers.txt"));
-
         let trusted = tls::load_trusted(&trusted_path);
         info!("TLS enabled — {} trusted fingerprint(s)", trusted.len());
         if trusted.is_empty() {
-            tracing::warn!(
-                "No trusted fingerprints found in {}",
-                trusted_path.display()
-            );
-            tracing::warn!(
-                "Start the Linux client once (TLS mode) to get its fingerprint,\
-                 then add it to trusted_peers.txt"
-            );
+            tracing::warn!("No trusted fingerprints in {}", trusted_path.display());
         }
         Some(tls::make_connector(trusted).context("build TLS connector")?)
     } else {
         None
     };
 
-    // Connect to Linux client and stream events (blocks forever, reconnects).
-    let addr = format!("{}:{}", config.client_addr, config.port);
-    net::run(&addr, event_rx, config.heartbeat_ms, config.clipboard, tls_connector).await?;
+    // One network task per client (each reconnects forever on its own).
+    let mut handles = Vec::with_capacity(clients.len());
+    for (c, rx) in clients.into_iter().zip(receivers) {
+        let connector = if c.tls { tls_connector.clone() } else { None };
+        let heartbeat = config.heartbeat_ms;
+        let clipboard = config.clipboard;
+        handles.push(tokio::spawn(async move {
+            if let Err(e) = net::run(c.id, &c.addr, rx, heartbeat, clipboard, connector).await {
+                tracing::error!("client {} net task ended: {e}", c.id);
+            }
+        }));
+    }
+    for h in handles {
+        let _ = h.await;
+    }
 
     hook::stop();
     Ok(())
+}
+
+/// A client resolved to its address + portal layout.
+#[cfg(windows)]
+struct ResolvedClient {
+    id: usize,
+    name: String,
+    addr: String,
+    tls: bool,
+    layout: hook::Layout,
+}
+
+/// Build the client list: the new `[[clients]]` array if present, otherwise a
+/// single client from the legacy top-level fields (backward compatible).
+#[cfg(windows)]
+fn resolve_clients(config: &Config) -> Vec<ResolvedClient> {
+    let mons = monitors::enumerate();
+
+    if !config.clients.is_empty() {
+        return config
+            .clients
+            .iter()
+            .enumerate()
+            .map(|(id, c)| {
+                let layout = if let Some(pair) = c.between.as_ref().filter(|p| p.len() == 2) {
+                    layout_between(&pair[0], &pair[1], &mons)
+                        .unwrap_or_else(|| layout_edge(c.edge.as_deref().unwrap_or("right")))
+                } else {
+                    layout_edge(c.edge.as_deref().unwrap_or("right"))
+                };
+                let name = if c.name.is_empty() { format!("client{id}") } else { c.name.clone() };
+                ResolvedClient { id, name, addr: format!("{}:{}", c.addr, c.port), tls: c.tls, layout }
+            })
+            .collect();
+    }
+
+    // Legacy single client.
+    vec![ResolvedClient {
+        id: 0,
+        name: "client".into(),
+        addr: format!("{}:{}", config.client_addr, config.port),
+        tls: config.tls,
+        layout: build_layout(config),
+    }]
 }
 
 /// Build the runtime layout from config + actual monitor geometry.
@@ -251,86 +344,64 @@ async fn async_main() -> Result<()> {
 /// (missing monitors, only one display, unknown names…).
 #[cfg(windows)]
 fn build_layout(config: &Config) -> hook::Layout {
-    let edge_layout = || {
-        let edge_kind = edge::Edge::from_str(&config.edge).unwrap_or_else(|| {
-            tracing::warn!("unknown edge '{}' — defaulting to 'right'", config.edge);
-            edge::Edge::Right
-        });
-        hook::Layout::Edge { side: edge_kind.side(), screen: edge::virtual_screen() }
-    };
-
     let Some(layout_cfg) = config.layout.as_ref().filter(|l| l.mode == "between") else {
-        return edge_layout();
+        return layout_edge(&config.edge);
     };
 
     let mons = monitors::enumerate();
-    if mons.len() < 2 {
-        tracing::warn!(
-            "layout mode 'between' needs 2+ monitors but {} detected — falling back to edge mode",
-            mons.len()
-        );
-        return edge_layout();
-    }
-
-    // Resolve the two monitors flanking the laptop (config names them; the
-    // orientation — side-by-side or stacked — is inferred from geometry).
-    let (mon_a, mon_b) = if !layout_cfg.monitor_left.is_empty()
+    // Resolve the two monitor names (explicit, or auto = two leftmost).
+    let (a_name, b_name) = if !layout_cfg.monitor_left.is_empty()
         && !layout_cfg.monitor_right.is_empty()
     {
-        match (
-            monitors::find(&mons, &layout_cfg.monitor_left),
-            monitors::find(&mons, &layout_cfg.monitor_right),
-        ) {
-            (Some(a), Some(b)) => (a.clone(), b.clone()),
-            _ => {
-                tracing::warn!(
-                    "layout monitors '{}'/'{}' not found (have: {:?}) — falling back to edge mode",
-                    layout_cfg.monitor_left,
-                    layout_cfg.monitor_right,
-                    mons.iter().map(|m| m.device.clone()).collect::<Vec<_>>()
-                );
-                return edge_layout();
-            }
-        }
+        (layout_cfg.monitor_left.clone(), layout_cfg.monitor_right.clone())
     } else {
-        // Auto: the two monitors sorted left-to-right.
         let mut sorted = mons.clone();
         sorted.sort_by_key(|m| m.left);
-        (sorted[0].clone(), sorted[1].clone())
+        if sorted.len() >= 2 {
+            (sorted[0].device.clone(), sorted[1].device.clone())
+        } else {
+            tracing::warn!("'between' needs 2+ monitors — falling back to edge mode");
+            return layout_edge(&config.edge);
+        }
     };
 
+    layout_between(&a_name, &b_name, &mons).unwrap_or_else(|| layout_edge(&config.edge))
+}
+
+/// Build an outer-edge layout from an edge string.
+#[cfg(windows)]
+fn layout_edge(edge: &str) -> hook::Layout {
+    let edge_kind = edge::Edge::from_str(edge).unwrap_or_else(|| {
+        tracing::warn!("unknown edge '{edge}' — defaulting to 'right'");
+        edge::Edge::Right
+    });
+    hook::Layout::Edge { side: edge_kind.side(), screen: edge::virtual_screen() }
+}
+
+/// Build a between-monitors layout from two monitor names. Orientation
+/// (side by side vs stacked) is inferred from their real geometry. Returns
+/// None if a monitor isn't found or the two don't share an edge.
+#[cfg(windows)]
+fn layout_between(a_name: &str, b_name: &str, mons: &[monitors::Monitor]) -> Option<hook::Layout> {
+    let a = monitors::find(mons, a_name)?.clone();
+    let b = monitors::find(mons, b_name)?.clone();
     let rect = |m: &monitors::Monitor| hook::Rect {
         left: m.left, top: m.top, right: m.right, bottom: m.bottom,
     };
 
-    // Side-by-side iff they overlap vertically; stacked iff they overlap
-    // horizontally. Prefer the one with the larger shared band if ambiguous.
-    let y_overlap = (mon_a.top.max(mon_b.top) < mon_a.bottom.min(mon_b.bottom)) as i32
-        * (mon_a.bottom.min(mon_b.bottom) - mon_a.top.max(mon_b.top));
-    let x_overlap = (mon_a.left.max(mon_b.left) < mon_a.right.min(mon_b.right)) as i32
-        * (mon_a.right.min(mon_b.right) - mon_a.left.max(mon_b.left));
+    let y_overlap = (a.top.max(b.top) < a.bottom.min(b.bottom)) as i32
+        * (a.bottom.min(b.bottom) - a.top.max(b.top));
+    let x_overlap = (a.left.max(b.left) < a.right.min(b.right)) as i32
+        * (a.right.min(b.right) - a.left.max(b.left));
 
     if y_overlap >= x_overlap && y_overlap > 0 {
-        // Side by side. Order left→right.
-        let (l, r) = if mon_a.left <= mon_b.left { (&mon_a, &mon_b) } else { (&mon_b, &mon_a) };
-        let boundary_x = l.right;
-        if (r.left - boundary_x).abs() > 1 {
-            tracing::warn!("'{}' and '{}' not adjacent (gap {}px)", l.device, r.device, r.left - boundary_x);
-        }
-        hook::Layout::SideBySide { left: rect(l), right: rect(r), boundary_x }
+        let (l, r) = if a.left <= b.left { (&a, &b) } else { (&b, &a) };
+        Some(hook::Layout::SideBySide { left: rect(l), right: rect(r), boundary_x: l.right })
     } else if x_overlap > 0 {
-        // Stacked. Order top→bottom.
-        let (t, b) = if mon_a.top <= mon_b.top { (&mon_a, &mon_b) } else { (&mon_b, &mon_a) };
-        let boundary_y = t.bottom;
-        if (b.top - boundary_y).abs() > 1 {
-            tracing::warn!("'{}' and '{}' not adjacent (gap {}px)", t.device, b.device, b.top - boundary_y);
-        }
-        hook::Layout::Stacked { top: rect(t), bottom: rect(b), boundary_y }
+        let (t, bo) = if a.top <= b.top { (&a, &b) } else { (&b, &a) };
+        Some(hook::Layout::Stacked { top: rect(t), bottom: rect(bo), boundary_y: t.bottom })
     } else {
-        tracing::warn!(
-            "monitors '{}' and '{}' don't share an edge — falling back to edge mode",
-            mon_a.device, mon_b.device
-        );
-        edge_layout()
+        tracing::warn!("monitors '{}' and '{}' don't share an edge", a.device, b.device);
+        None
     }
 }
