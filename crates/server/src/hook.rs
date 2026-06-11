@@ -201,9 +201,14 @@ pub enum Layout {
     /// Classic mode: the laptop is past an outer edge of the whole desktop.
     /// `side`: 0=right 1=left 2=bottom 3=top.  `screen` is the virtual screen.
     Edge { side: u8, screen: Rect },
-    /// The laptop sits BETWEEN two horizontally adjacent monitors: crossing
-    /// the boundary in either direction routes input through the laptop.
-    Between { left_mon: Rect, right_mon: Rect, boundary_x: i32 },
+    /// The laptop sits BETWEEN two horizontally adjacent monitors (laptop to
+    /// the side). Crossing the vertical boundary line routes through the
+    /// laptop's left/right edge.
+    SideBySide { left: Rect, right: Rect, boundary_x: i32 },
+    /// The laptop sits BETWEEN two vertically stacked monitors (one above the
+    /// other, laptop in the middle). Crossing the horizontal boundary line
+    /// routes through the laptop's top/bottom edge.
+    Stacked { top: Rect, bottom: Rect, boundary_y: i32 },
 }
 
 static LAYOUT: OnceLock<Layout> = OnceLock::new();
@@ -500,7 +505,7 @@ unsafe fn check_edge_and_enter(x: i32, y: i32) -> bool {
             }
             false
         }
-        Layout::Between { left_mon, right_mon, boundary_x } => {
+        Layout::SideBySide { left, right, boundary_x } => {
             let prev_valid = PREV_VALID.load(Ordering::Relaxed);
             let px = PREV_X.load(Ordering::Relaxed);
             set_prev(x, y);
@@ -508,26 +513,51 @@ unsafe fn check_edge_and_enter(x: i32, y: i32) -> bool {
                 return false;
             }
             // The laptop only bridges the band the two monitors share
-            // vertically. Crossing the boundary OUTSIDE that band (e.g. at a
-            // height where one monitor is taller than the other) should pass
-            // straight monitor→monitor, not route through the laptop.
-            let band_top = left_mon.top.max(right_mon.top);
-            let band_bottom = left_mon.bottom.min(right_mon.bottom);
+            // vertically. Crossing OUTSIDE that band (a height where one
+            // monitor is taller) passes straight monitor→monitor.
+            let band_top = left.top.max(right.top);
+            let band_bottom = left.bottom.min(right.bottom);
             let in_band = y >= band_top && y < band_bottom;
 
             if px < boundary_x && x >= boundary_x && in_band {
-                // Crossing left monitor → right monitor: route through laptop,
-                // entering its LEFT edge.
                 let frac = frac_of(y, band_top, band_bottom);
                 tracing::debug!("boundary cross L→R at y={y} — entering capture");
                 enter_capture(EDGE_LEFT, frac, 0);
                 return true;
             }
             if px >= boundary_x && x < boundary_x && in_band {
-                // Crossing right monitor → left monitor: enter laptop's RIGHT edge.
                 let frac = frac_of(y, band_top, band_bottom);
                 tracing::debug!("boundary cross R→L at y={y} — entering capture");
                 enter_capture(EDGE_RIGHT, frac, 1);
+                return true;
+            }
+            false
+        }
+        Layout::Stacked { top, bottom, boundary_y } => {
+            use yzendris_protocol::{EDGE_BOTTOM, EDGE_TOP};
+            let prev_valid = PREV_VALID.load(Ordering::Relaxed);
+            let py = PREV_Y.load(Ordering::Relaxed);
+            set_prev(x, y);
+            if !prev_valid || !connected {
+                return false;
+            }
+            // Bridge only the band the two monitors share horizontally.
+            let band_left = top.left.max(bottom.left);
+            let band_right = top.right.min(bottom.right);
+            let in_band = x >= band_left && x < band_right;
+
+            if py < boundary_y && y >= boundary_y && in_band {
+                // Crossing top monitor → bottom monitor: enter laptop's TOP edge.
+                let frac = frac_of(x, band_left, band_right);
+                tracing::debug!("boundary cross T→B at x={x} — entering capture");
+                enter_capture(EDGE_TOP, frac, 0);
+                return true;
+            }
+            if py >= boundary_y && y < boundary_y && in_band {
+                // Crossing bottom monitor → top monitor: enter laptop's BOTTOM edge.
+                let frac = frac_of(x, band_left, band_right);
+                tracing::debug!("boundary cross B→T at x={x} — entering capture");
+                enter_capture(EDGE_BOTTOM, frac, 1);
                 return true;
             }
             false
@@ -569,23 +599,38 @@ pub fn release_capture_toward(edge: u8, frac: f32) {
 
     // Work out where the cursor should reappear on the Windows desktop.
     let target: Option<(i32, i32)> = match *layout {
-        Layout::Between { left_mon, right_mon, boundary_x } => {
+        Layout::SideBySide { left, right, boundary_x } => {
             // `frac` is relative to the shared vertical band (same basis as
             // capture entry), so map it back through that band.
-            let band_top = left_mon.top.max(right_mon.top);
-            let band_bottom = left_mon.bottom.min(right_mon.bottom);
+            let band_top = left.top.max(right.top);
+            let band_bottom = left.bottom.min(right.bottom);
             match edge {
-                // Client cursor left through its RIGHT edge → continue on the
-                // right monitor, just past the boundary.
                 EDGE_RIGHT => Some((
                     boundary_x + RETURN_MARGIN,
                     lerp_clamped(band_top, band_bottom, frac),
                 )),
-                // Client cursor left through its LEFT edge → back to the left
-                // monitor, just before the boundary.
                 EDGE_LEFT => Some((
                     boundary_x - 1 - RETURN_MARGIN,
                     lerp_clamped(band_top, band_bottom, frac),
+                )),
+                _ => None,
+            }
+        }
+        Layout::Stacked { top, bottom, boundary_y } => {
+            // `frac` is relative to the shared horizontal band.
+            let band_left = top.left.max(bottom.left);
+            let band_right = top.right.min(bottom.right);
+            match edge {
+                // Client left through its BOTTOM edge → continue on the bottom
+                // monitor, just past the boundary.
+                EDGE_BOTTOM => Some((
+                    lerp_clamped(band_left, band_right, frac),
+                    boundary_y + RETURN_MARGIN,
+                )),
+                // Client left through its TOP edge → back to the top monitor.
+                EDGE_TOP => Some((
+                    lerp_clamped(band_left, band_right, frac),
+                    boundary_y - 1 - RETURN_MARGIN,
                 )),
                 _ => None,
             }
@@ -656,9 +701,14 @@ unsafe fn exit_capture() {
     ShowCursor(BOOL(1));
     // Release combo = "bring the cursor back here". In Between mode return to
     // the centre of the monitor the cursor came from; otherwise the park centre.
+    let came_from = CAME_FROM.load(Ordering::Relaxed);
     let (cx, cy) = match LAYOUT.get() {
-        Some(Layout::Between { left_mon, right_mon, .. }) => {
-            let m = if CAME_FROM.load(Ordering::Relaxed) == 0 { left_mon } else { right_mon };
+        Some(Layout::SideBySide { left, right, .. }) => {
+            let m = if came_from == 0 { left } else { right };
+            ((m.left + m.right) / 2, (m.top + m.bottom) / 2)
+        }
+        Some(Layout::Stacked { top, bottom, .. }) => {
+            let m = if came_from == 0 { top } else { bottom };
             ((m.left + m.right) / 2, (m.top + m.bottom) / 2)
         }
         _ => (
