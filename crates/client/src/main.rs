@@ -3,6 +3,10 @@
 // laptop is booted into Windows, on Windows (SendInput). The platform backend
 // is selected at compile time in `platform`.
 
+// No console window on Windows (startup task, double-click, etc). Logging goes
+// to %APPDATA%\yzendris\client.log instead of a terminal.
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 mod clipboard;
 mod net;
 mod platform;
@@ -119,14 +123,46 @@ fn main() {
         });
 }
 
+/// RUST_LOG wins when set; the info default applies when it's absent.
+fn build_filter() -> tracing_subscriber::EnvFilter {
+    tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("yzendris_client=info"))
+}
+
+/// Set up logging. On Windows there's no console (windows_subsystem="windows"),
+/// so write to %APPDATA%\yzendris\client.log (no ANSI colour codes). On Linux
+/// keep stdout, which systemd/journald captures.
+fn init_logging() {
+    #[cfg(windows)]
+    {
+        let log_path = dirs_path().map(|d| d.join("client.log"));
+        if let Some(parent) = log_path.as_ref().and_then(|p| p.parent()) {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let file = log_path.as_ref().and_then(|p| {
+            std::fs::OpenOptions::new().create(true).append(true).open(p).ok()
+        });
+        match file {
+            Some(f) => {
+                tracing_subscriber::fmt()
+                    .with_env_filter(build_filter())
+                    .with_writer(std::sync::Mutex::new(f))
+                    .with_ansi(false)
+                    .init();
+            }
+            None => {
+                tracing_subscriber::fmt().with_env_filter(build_filter()).init();
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        tracing_subscriber::fmt().with_env_filter(build_filter()).init();
+    }
+}
+
 async fn async_main() -> Result<()> {
-    // RUST_LOG wins when set; the info default applies when it's absent.
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("yzendris_client=info")),
-        )
-        .init();
+    init_logging();
 
     let args: Vec<String> = std::env::args().collect();
     let stdin_mode = args.contains(&"--stdin".to_owned());
