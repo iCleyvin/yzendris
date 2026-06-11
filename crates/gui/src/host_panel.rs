@@ -130,20 +130,21 @@ impl HostPanel {
             ui.label("¿Dónde está físicamente el laptop respecto a las pantallas de esta PC?");
             ui.add_space(4.0);
 
-            // Options: between each adjacent pair + the four outer edges.
-            for i in 0..self.monitors.len().saturating_sub(1) {
+            // Options: the laptop between any two ADJACENT monitors (side by
+            // side OR stacked), plus the four outer edges.
+            for (i, j, kind) in adjacent_pairs(&self.monitors) {
                 let label = format!(
-                    "Entre la pantalla {} y la pantalla {}",
+                    "Entre la pantalla {} y la {} ({kind})",
                     self.monitors[i].number(),
-                    self.monitors[i + 1].number()
+                    self.monitors[j].number(),
                 );
-                ui.radio_value(&mut self.laptop_pos, LaptopPos::Between(i, i + 1), label);
+                ui.radio_value(&mut self.laptop_pos, LaptopPos::Between(i, j), label);
             }
             for (edge, label) in [
                 ("right", "Al borde derecho de todo"),
                 ("left", "Al borde izquierdo de todo"),
-                ("top", "Arriba"),
-                ("bottom", "Abajo"),
+                ("top", "Arriba de todo"),
+                ("bottom", "Abajo de todo"),
             ] {
                 ui.radio_value(&mut self.laptop_pos, LaptopPos::Edge(edge.into()), label);
             }
@@ -256,6 +257,38 @@ impl HostPanel {
     }
 }
 
+/// Whether two monitors are stacked (share a horizontal edge), as opposed to
+/// side by side (share a vertical edge). Matches the server's orientation rule.
+fn pair_is_stacked(a: &MonitorInfo, b: &MonitorInfo) -> bool {
+    let y_ov = (a.top.max(b.top) < a.bottom.min(b.bottom)) as i32
+        * (a.bottom.min(b.bottom) - a.top.max(b.top));
+    let x_ov = (a.left.max(b.left) < a.right.min(b.right)) as i32
+        * (a.right.min(b.right) - a.left.max(b.left));
+    x_ov > y_ov
+}
+
+/// All pairs of monitors that share an edge, with a human label for the
+/// orientation. Used to offer every valid spot to place the laptop.
+fn adjacent_pairs(monitors: &[MonitorInfo]) -> Vec<(usize, usize, &'static str)> {
+    let mut out = Vec::new();
+    for i in 0..monitors.len() {
+        for j in (i + 1)..monitors.len() {
+            let a = &monitors[i];
+            let b = &monitors[j];
+            let y_ov = a.top.max(b.top) < a.bottom.min(b.bottom);
+            let x_ov = a.left.max(b.left) < a.right.min(b.right);
+            let h_adj = y_ov && ((a.right - b.left).abs() <= 2 || (b.right - a.left).abs() <= 2);
+            let v_adj = x_ov && ((a.bottom - b.top).abs() <= 2 || (b.bottom - a.top).abs() <= 2);
+            if v_adj && pair_is_stacked(a, b) {
+                out.push((i, j, "apiladas"));
+            } else if h_adj {
+                out.push((i, j, "lado a lado"));
+            }
+        }
+    }
+    out
+}
+
 /// Reverse-map the saved config to a UI position choice.
 fn laptop_pos_from_config(cfg: &ServerConfig, monitors: &[MonitorInfo]) -> LaptopPos {
     if let Some(layout) = cfg.layout.as_ref().filter(|l| l.mode == "between") {
@@ -312,22 +345,47 @@ fn draw_arrangement(ui: &mut egui::Ui, monitors: &[MonitorInfo], pos: &LaptopPos
         .unwrap();
 
     match pos {
-        LaptopPos::Between(i, _) if *i < monitors.len() => {
-            let boundary = monitors[*i].right as f32;
-            for (r, _, _) in rects.iter_mut() {
-                if r.min.x >= boundary - 1.0 {
-                    *r = r.translate(egui::vec2(laptop_w + 2.0 * gap, 0.0));
+        LaptopPos::Between(i, j) if *i < monitors.len() && *j < monitors.len() => {
+            let a = &monitors[*i];
+            let b = &monitors[*j];
+            if pair_is_stacked(a, b) {
+                // Vertical gap: insert the laptop between top and bottom, shift
+                // everything below the boundary downward.
+                let (t, bo) = if a.top <= b.top { (a, b) } else { (b, a) };
+                let boundary = t.bottom as f32;
+                for (r, _, _) in rects.iter_mut() {
+                    if r.min.y >= boundary - 1.0 {
+                        *r = r.translate(egui::vec2(0.0, laptop_h + 2.0 * gap));
+                    }
                 }
+                let band_cx = (t.left.max(bo.left) + t.right.min(bo.right)) as f32 / 2.0;
+                rects.push((
+                    egui::Rect::from_center_size(
+                        egui::pos2(band_cx, boundary + gap + laptop_h / 2.0),
+                        egui::vec2(laptop_w, laptop_h),
+                    ),
+                    "Laptop".into(),
+                    true,
+                ));
+            } else {
+                // Horizontal gap: insert between left and right.
+                let (l, r_mon) = if a.left <= b.left { (a, b) } else { (b, a) };
+                let boundary = l.right as f32;
+                for (r, _, _) in rects.iter_mut() {
+                    if r.min.x >= boundary - 1.0 {
+                        *r = r.translate(egui::vec2(laptop_w + 2.0 * gap, 0.0));
+                    }
+                }
+                let band_cy = (l.top.max(r_mon.top) + l.bottom.min(r_mon.bottom)) as f32 / 2.0;
+                rects.push((
+                    egui::Rect::from_center_size(
+                        egui::pos2(boundary + gap + laptop_w / 2.0, band_cy),
+                        egui::vec2(laptop_w, laptop_h),
+                    ),
+                    "Laptop".into(),
+                    true,
+                ));
             }
-            let cy = (monitors[*i].top + monitors[*i].bottom) as f32 / 2.0;
-            rects.push((
-                egui::Rect::from_center_size(
-                    egui::pos2(boundary + gap + laptop_w / 2.0, cy),
-                    egui::vec2(laptop_w, laptop_h),
-                ),
-                "Laptop".into(),
-                true,
-            ));
         }
         LaptopPos::Edge(edge) => {
             let center = bbox.center();

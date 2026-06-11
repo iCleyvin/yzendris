@@ -272,8 +272,9 @@ fn build_layout(config: &Config) -> hook::Layout {
         return edge_layout();
     }
 
-    // Resolve the two monitors flanking the laptop.
-    let (left_m, right_m) = if !layout_cfg.monitor_left.is_empty()
+    // Resolve the two monitors flanking the laptop (config names them; the
+    // orientation — side-by-side or stacked — is inferred from geometry).
+    let (mon_a, mon_b) = if !layout_cfg.monitor_left.is_empty()
         && !layout_cfg.monitor_right.is_empty()
     {
         match (
@@ -298,29 +299,38 @@ fn build_layout(config: &Config) -> hook::Layout {
         (sorted[0].clone(), sorted[1].clone())
     };
 
-    // Ensure left really is to the left of right (swap if user mixed them up).
-    let (left_m, right_m) = if left_m.left <= right_m.left {
-        (left_m, right_m)
-    } else {
-        tracing::warn!("monitor_left/right appear swapped — correcting");
-        (right_m, left_m)
+    let rect = |m: &monitors::Monitor| hook::Rect {
+        left: m.left, top: m.top, right: m.right, bottom: m.bottom,
     };
 
-    let boundary_x = left_m.right;
-    if (right_m.left - boundary_x).abs() > 1 {
-        tracing::warn!(
-            "monitors '{}' and '{}' are not adjacent (gap of {}px) — boundary at x={}",
-            left_m.device, right_m.device, right_m.left - boundary_x, boundary_x
-        );
-    }
+    // Side-by-side iff they overlap vertically; stacked iff they overlap
+    // horizontally. Prefer the one with the larger shared band if ambiguous.
+    let y_overlap = (mon_a.top.max(mon_b.top) < mon_a.bottom.min(mon_b.bottom)) as i32
+        * (mon_a.bottom.min(mon_b.bottom) - mon_a.top.max(mon_b.top));
+    let x_overlap = (mon_a.left.max(mon_b.left) < mon_a.right.min(mon_b.right)) as i32
+        * (mon_a.right.min(mon_b.right) - mon_a.left.max(mon_b.left));
 
-    hook::Layout::Between {
-        left_mon: hook::Rect {
-            left: left_m.left, top: left_m.top, right: left_m.right, bottom: left_m.bottom,
-        },
-        right_mon: hook::Rect {
-            left: right_m.left, top: right_m.top, right: right_m.right, bottom: right_m.bottom,
-        },
-        boundary_x,
+    if y_overlap >= x_overlap && y_overlap > 0 {
+        // Side by side. Order left→right.
+        let (l, r) = if mon_a.left <= mon_b.left { (&mon_a, &mon_b) } else { (&mon_b, &mon_a) };
+        let boundary_x = l.right;
+        if (r.left - boundary_x).abs() > 1 {
+            tracing::warn!("'{}' and '{}' not adjacent (gap {}px)", l.device, r.device, r.left - boundary_x);
+        }
+        hook::Layout::SideBySide { left: rect(l), right: rect(r), boundary_x }
+    } else if x_overlap > 0 {
+        // Stacked. Order top→bottom.
+        let (t, b) = if mon_a.top <= mon_b.top { (&mon_a, &mon_b) } else { (&mon_b, &mon_a) };
+        let boundary_y = t.bottom;
+        if (b.top - boundary_y).abs() > 1 {
+            tracing::warn!("'{}' and '{}' not adjacent (gap {}px)", t.device, b.device, b.top - boundary_y);
+        }
+        hook::Layout::Stacked { top: rect(t), bottom: rect(b), boundary_y }
+    } else {
+        tracing::warn!(
+            "monitors '{}' and '{}' don't share an edge — falling back to edge mode",
+            mon_a.device, mon_b.device
+        );
+        edge_layout()
     }
 }
