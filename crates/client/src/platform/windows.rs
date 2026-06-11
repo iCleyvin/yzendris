@@ -203,7 +203,8 @@ impl Injector {
             | Event::Heartbeat
             | Event::ClipboardText { .. }
             | Event::EnterAt { .. }
-            | Event::EdgeReached { .. } => {
+            | Event::EdgeReached { .. }
+            | Event::ClientInfo { .. } => {
                 return Ok(false);
             }
         }
@@ -248,6 +249,20 @@ pub fn cursor_pos() -> Option<(i32, i32)> {
 pub fn move_cursor(x: i32, y: i32) {
     unsafe {
         let _ = SetCursorPos(x, y);
+    }
+}
+
+/// The primary screen resolution, for reporting to the host.
+pub fn screen_size() -> Option<(i32, i32)> {
+    use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN};
+    unsafe {
+        let w = GetSystemMetrics(SM_CXSCREEN);
+        let h = GetSystemMetrics(SM_CYSCREEN);
+        if w > 0 && h > 0 {
+            Some((w, h))
+        } else {
+            None
+        }
     }
 }
 

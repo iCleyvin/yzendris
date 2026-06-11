@@ -155,6 +155,9 @@ where
                         // control back on the matching Windows side.
                         crate::hook::release_capture_toward(client, edge, frac);
                     }
+                    Some(Event::ClientInfo { width, height }) => {
+                        crate::hook::set_client_resolution(client, width, height);
+                    }
                     Some(_) => { /* unexpected — ignore */ }
                     None => break Ok(()), // reader task ended (EOF or error)
                 }

@@ -102,7 +102,7 @@ impl HostPanel {
             });
             ui.label("Arrastra una PANTALLA para reubicarla en Windows, o un CLIENTE (verde) a un lado de una pantalla o al hueco entre dos. Los cambios se aplican al instante.");
             let (reposition, client_changed) =
-                arrangement_editor(ui, &self.monitors, &mut self.cfg.clients);
+                arrangement_editor(ui, &self.monitors, &mut self.cfg.clients, &status.client_res);
             let mut apply = client_changed;
             if let Some(changes) = reposition {
                 match monitors::reposition(&changes) {
@@ -463,6 +463,7 @@ fn arrangement_editor(
     ui: &mut egui::Ui,
     monitors: &[MonitorInfo],
     clients: &mut [ClientEntry],
+    client_res: &std::collections::HashMap<usize, (i32, i32)>,
 ) -> (Option<Vec<(String, i32, i32)>>, bool) {
     if monitors.is_empty() {
         ui.label("(no se detectaron pantallas — disponible solo en Windows)");
@@ -629,7 +630,11 @@ fn arrangement_editor(
                 }
             }
         }
-        client_draws.push((draw_center, client.name.clone(), r.dragged()));
+        let label = match client_res.get(&ci) {
+            Some((w, h)) => format!("{}\n{}×{}", client.name, w, h),
+            None => client.name.clone(),
+        };
+        client_draws.push((draw_center, label, r.dragged()));
     }
 
     // ── Monitors (draggable to relocate in Windows) ──────────────────────────

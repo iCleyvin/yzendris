@@ -55,17 +55,34 @@ fn log_path(t: Target) -> PathBuf {
 pub struct DaemonState {
     pub running: bool,
     pub log: String,
-    /// Server only: bitmask of connected clients (bit k = client k). Read from
-    /// the status file the server writes on each connect/disconnect.
+    /// Server only: bitmask of connected clients (bit k = client k).
     pub connected_mask: u64,
+    /// Server only: per-client screen resolution reported by each client.
+    pub client_res: std::collections::HashMap<usize, (i32, i32)>,
 }
 
-/// Connected-clients bitmask written by the running server.
-fn read_connected_mask() -> u64 {
-    std::fs::read_to_string(crate::config_model::server_status_path())
-        .ok()
-        .and_then(|s| s.trim().parse::<u64>().ok())
-        .unwrap_or(0)
+/// Read the server status file: (connected bitmask, per-client resolution).
+/// Line 1 is the bitmask; `res <id> <w> <h>` lines carry resolutions.
+fn read_status() -> (u64, std::collections::HashMap<usize, (i32, i32)>) {
+    let mut mask = 0u64;
+    let mut res = std::collections::HashMap::new();
+    if let Ok(s) = std::fs::read_to_string(crate::config_model::server_status_path()) {
+        for (i, line) in s.lines().enumerate() {
+            if i == 0 {
+                mask = line.trim().parse().unwrap_or(0);
+            } else if let Some(rest) = line.strip_prefix("res ") {
+                let p: Vec<&str> = rest.split_whitespace().collect();
+                if p.len() == 3 {
+                    if let (Ok(id), Ok(w), Ok(h)) =
+                        (p[0].parse::<usize>(), p[1].parse::<i32>(), p[2].parse::<i32>())
+                    {
+                        res.insert(id, (w, h));
+                    }
+                }
+            }
+        }
+    }
+    (mask, res)
 }
 
 /// Polls daemon status + log on a background thread so the UI never blocks on
@@ -80,6 +97,7 @@ impl DaemonMonitor {
             running: false,
             log: String::from("(consultando…)"),
             connected_mask: 0,
+            client_res: std::collections::HashMap::new(),
         }));
         let shared = state.clone();
         std::thread::Builder::new()
@@ -87,15 +105,15 @@ impl DaemonMonitor {
             .spawn(move || loop {
                 let running = daemon_running(target);
                 let log = read_log_tail(target, 20);
-                // Per-client connection state comes from the server's status
-                // file (the log is unreliable — connection lines scroll away).
-                let connected_mask = if matches!(target, Target::Server) && running {
-                    read_connected_mask()
+                // Per-client connection + resolution come from the server's
+                // status file (the log is unreliable — lines scroll away).
+                let (connected_mask, client_res) = if matches!(target, Target::Server) && running {
+                    read_status()
                 } else {
-                    0
+                    (0, std::collections::HashMap::new())
                 };
                 if let Ok(mut s) = shared.lock() {
-                    *s = DaemonState { running, log, connected_mask };
+                    *s = DaemonState { running, log, connected_mask, client_res };
                 }
                 std::thread::sleep(Duration::from_secs(2));
             })
