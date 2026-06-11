@@ -20,7 +20,7 @@ impl ClientPanel {
             cfg: config_model::load_client_config(),
             fingerprint: read_fingerprint(),
             status_msg: String::new(),
-            monitor: daemon::DaemonMonitor::new(),
+            monitor: daemon::DaemonMonitor::new(daemon::Target::Client),
         }
     }
 
@@ -28,7 +28,7 @@ impl ClientPanel {
         match config_model::save_client_config(&self.cfg) {
             Ok(()) => {
                 if running {
-                    daemon::restart_async();
+                    daemon::restart_async(daemon::Target::Client);
                     self.status_msg = "✔ Guardado, reiniciando cliente…".into();
                 } else {
                     self.status_msg = "✔ Configuración guardada".into();
@@ -44,14 +44,6 @@ impl ClientPanel {
             self.fingerprint = read_fingerprint();
         }
         ui.ctx().request_repaint_after(Duration::from_secs(1));
-
-        if cfg!(windows) {
-            ui.colored_label(
-                egui::Color32::YELLOW,
-                "⚠ El modo Cliente requiere Linux (la inyección usa /dev/uinput).",
-            );
-            ui.separator();
-        }
 
         egui::ScrollArea::vertical().show(ui, |ui| {
             ui.heading("Recepción");
@@ -111,12 +103,12 @@ impl ClientPanel {
                 }
                 if status.running {
                     if ui.button("⏹ Detener cliente").clicked() {
-                        daemon::stop_async();
+                        daemon::stop_async(daemon::Target::Client);
                         self.status_msg = "Deteniendo cliente…".into();
                     }
                 } else if ui.button("▶ Iniciar cliente").clicked() {
                     let _ = config_model::save_client_config(&self.cfg);
-                    daemon::start_async();
+                    daemon::start_async(daemon::Target::Client);
                     self.status_msg = "Iniciando cliente…".into();
                 }
 
@@ -147,20 +139,13 @@ impl ClientPanel {
 }
 
 /// SHA-256 fingerprint of the client certificate, matching the format the
-/// client daemon prints (`sha256:aa:bb:…`).
-#[cfg(target_os = "linux")]
+/// client daemon prints (`sha256:aa:bb:…`). Works on both Linux and Windows —
+/// the client generates `cert.pem` in the config dir on either OS.
 fn read_fingerprint() -> Option<String> {
     use sha2::{Digest, Sha256};
     let pem = std::fs::read(config_model::config_dir().join("cert.pem")).ok()?;
-    let cert = rustls_pemfile::certs(&mut pem.as_slice())
-        .next()?
-        .ok()?;
+    let cert = rustls_pemfile::certs(&mut pem.as_slice()).next()?.ok()?;
     let hash = Sha256::digest(cert.as_ref());
     let hex: Vec<String> = hash.iter().map(|b| format!("{b:02x}")).collect();
     Some(format!("sha256:{}", hex.join(":")))
-}
-
-#[cfg(not(target_os = "linux"))]
-fn read_fingerprint() -> Option<String> {
-    None
 }

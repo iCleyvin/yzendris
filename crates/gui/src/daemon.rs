@@ -1,8 +1,8 @@
-//! Start / stop / status of the yzendris daemons from the GUI.
+//! Start / stop / status of the yzendris daemons from the GUI, by ROLE.
 //!
-//! Windows: controls yzendris-server.exe (tasklist/taskkill, no console flash).
-//! Linux:   controls yzendris-client via systemd user unit when installed,
-//!          falling back to direct spawn / pkill.
+//! The controlled binary depends on the role the user picked, not just the OS:
+//!   - Server (host)  → yzendris-server.exe   (Windows only)
+//!   - Client         → yzendris-client.exe   (Windows)  /  yzendris-client (Linux)
 //!
 //! Every call here forks a subprocess (tasklist/pgrep/systemctl/journalctl)
 //! and would block whatever thread runs it. The egui render thread must never
@@ -12,10 +12,41 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+/// Which daemon a panel controls.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Target {
+    Server,
+    Client,
+}
+
 #[cfg(windows)]
-const SERVER_EXE: &str = "yzendris-server.exe";
+fn exe_name(t: Target) -> &'static str {
+    match t {
+        Target::Server => "yzendris-server.exe",
+        Target::Client => "yzendris-client.exe",
+    }
+}
 #[cfg(not(windows))]
-const CLIENT_BIN: &str = "yzendris-client";
+fn exe_name(t: Target) -> &'static str {
+    match t {
+        Target::Server => "yzendris-server",
+        Target::Client => "yzendris-client",
+    }
+}
+
+fn config_path(t: Target) -> PathBuf {
+    match t {
+        Target::Server => crate::config_model::server_config_path(),
+        Target::Client => crate::config_model::client_config_path(),
+    }
+}
+
+fn log_path(t: Target) -> PathBuf {
+    match t {
+        Target::Server => crate::config_model::server_log_path(),
+        Target::Client => crate::config_model::client_log_path(),
+    }
+}
 
 // ─── Background monitor + async controls (UI-thread-safe) ────────────────────
 
@@ -33,7 +64,7 @@ pub struct DaemonMonitor {
 }
 
 impl DaemonMonitor {
-    pub fn new() -> Self {
+    pub fn new(target: Target) -> Self {
         let state = Arc::new(Mutex::new(DaemonState {
             running: false,
             log: String::from("(consultando…)"),
@@ -42,8 +73,8 @@ impl DaemonMonitor {
         std::thread::Builder::new()
             .name("yzendris-daemon-monitor".into())
             .spawn(move || loop {
-                let running = daemon_running();
-                let log = read_log_tail(14);
+                let running = daemon_running(target);
+                let log = read_log_tail(target, 14);
                 if let Ok(mut s) = shared.lock() {
                     *s = DaemonState { running, log };
                 }
@@ -59,28 +90,28 @@ impl DaemonMonitor {
 }
 
 /// Start the daemon on a background thread (returns immediately).
-pub fn start_async() {
-    std::thread::spawn(|| {
-        if let Err(e) = start_daemon() {
+pub fn start_async(target: Target) {
+    std::thread::spawn(move || {
+        if let Err(e) = start_daemon(target) {
             tracing_warn(&format!("start_daemon: {e}"));
         }
     });
 }
 
 /// Stop the daemon on a background thread (returns immediately).
-pub fn stop_async() {
-    std::thread::spawn(|| {
-        let _ = stop_daemon();
+pub fn stop_async(target: Target) {
+    std::thread::spawn(move || {
+        let _ = stop_daemon(target);
     });
 }
 
 /// Stop, wait briefly, then start — all on a background thread so the 300 ms
 /// settle never freezes the UI.
-pub fn restart_async() {
-    std::thread::spawn(|| {
-        let _ = stop_daemon();
+pub fn restart_async(target: Target) {
+    std::thread::spawn(move || {
+        let _ = stop_daemon(target);
         std::thread::sleep(Duration::from_millis(300));
-        if let Err(e) = start_daemon() {
+        if let Err(e) = start_daemon(target) {
             tracing_warn(&format!("restart start_daemon: {e}"));
         }
     });
@@ -124,42 +155,56 @@ fn find_daemon_binary(name: &str) -> Option<PathBuf> {
     candidates.into_iter().find(|p| p.exists())
 }
 
-// ─── Windows: server control ─────────────────────────────────────────────────
+// ─── Windows control ─────────────────────────────────────────────────────────
 
 #[cfg(windows)]
-pub fn daemon_running() -> bool {
+pub fn daemon_running(target: Target) -> bool {
+    let exe = exe_name(target);
     quiet_command("tasklist")
-        .args(["/FI", &format!("IMAGENAME eq {SERVER_EXE}"), "/FO", "CSV", "/NH"])
+        .args(["/FI", &format!("IMAGENAME eq {exe}"), "/FO", "CSV", "/NH"])
         .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).contains(SERVER_EXE))
+        .map(|o| String::from_utf8_lossy(&o.stdout).contains(exe))
         .unwrap_or(false)
 }
 
 #[cfg(windows)]
-pub fn start_daemon() -> Result<(), String> {
-    let bin = find_daemon_binary(SERVER_EXE)
-        .ok_or_else(|| format!("{SERVER_EXE} no encontrado (¿compilaste con cargo build --release?)"))?;
-    let config = crate::config_model::server_config_path();
-    quiet_command(bin.to_str().unwrap_or(SERVER_EXE))
-        .args(["--config", &config.to_string_lossy()])
-        .spawn()
+pub fn start_daemon(target: Target) -> Result<(), String> {
+    let exe = exe_name(target);
+    let bin = find_daemon_binary(exe)
+        .ok_or_else(|| format!("{exe} no encontrado (¿compilaste con cargo build --release?)"))?;
+    let config = config_path(target);
+    let mut cmd = quiet_command(bin.to_str().unwrap_or(exe));
+    cmd.args(["--config", &config.to_string_lossy()]);
+
+    // The client logs to stdout/stderr (it has a console subsystem). Capture
+    // that into a log file the GUI can display. The server already logs to its
+    // own file internally.
+    if matches!(target, Target::Client) {
+        if let Ok(file) = std::fs::File::create(log_path(target)) {
+            if let Ok(err) = file.try_clone() {
+                cmd.stdout(std::process::Stdio::from(file));
+                cmd.stderr(std::process::Stdio::from(err));
+            }
+        }
+    }
+
+    cmd.spawn()
         .map(|_| ())
-        .map_err(|e| format!("no se pudo iniciar el servidor: {e}"))
+        .map_err(|e| format!("no se pudo iniciar {exe}: {e}"))
 }
 
 #[cfg(windows)]
-pub fn stop_daemon() -> Result<(), String> {
+pub fn stop_daemon(target: Target) -> Result<(), String> {
     quiet_command("taskkill")
-        .args(["/IM", SERVER_EXE, "/F"])
+        .args(["/IM", exe_name(target), "/F"])
         .output()
         .map(|_| ())
         .map_err(|e| format!("taskkill falló: {e}"))
 }
 
-/// Last lines of the daemon log.
 #[cfg(windows)]
-pub fn read_log_tail(max_lines: usize) -> String {
-    let path = crate::config_model::server_log_path();
+pub fn read_log_tail(target: Target, max_lines: usize) -> String {
+    let path = log_path(target);
     match std::fs::read_to_string(&path) {
         Ok(text) => {
             let lines: Vec<&str> = text.lines().collect();
@@ -170,7 +215,7 @@ pub fn read_log_tail(max_lines: usize) -> String {
     }
 }
 
-// ─── Linux: client control ───────────────────────────────────────────────────
+// ─── Linux control ───────────────────────────────────────────────────────────
 
 #[cfg(not(windows))]
 fn systemd_unit_installed() -> bool {
@@ -184,16 +229,23 @@ fn systemd_unit_installed() -> bool {
 }
 
 #[cfg(not(windows))]
-pub fn daemon_running() -> bool {
+pub fn daemon_running(target: Target) -> bool {
+    // The server is Windows-only; on Linux only the client is meaningful.
+    if matches!(target, Target::Server) {
+        return false;
+    }
     quiet_command("pgrep")
-        .args(["-x", CLIENT_BIN])
+        .args(["-x", exe_name(target)])
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
 }
 
 #[cfg(not(windows))]
-pub fn start_daemon() -> Result<(), String> {
+pub fn start_daemon(target: Target) -> Result<(), String> {
+    if matches!(target, Target::Server) {
+        return Err("el servidor (host) solo corre en Windows".into());
+    }
     if systemd_unit_installed() {
         let ok = quiet_command("systemctl")
             .args(["--user", "start", "yzendris-client.service"])
@@ -206,8 +258,8 @@ pub fn start_daemon() -> Result<(), String> {
     }
     // Fallback: direct spawn (wrapper injects the Wayland env when present).
     let bin = find_daemon_binary("yzendris-client-wrapper.sh")
-        .or_else(|| find_daemon_binary(CLIENT_BIN))
-        .ok_or_else(|| format!("{CLIENT_BIN} no encontrado"))?;
+        .or_else(|| find_daemon_binary(exe_name(target)))
+        .ok_or_else(|| format!("{} no encontrado", exe_name(target)))?;
     quiet_command(&bin.to_string_lossy())
         .spawn()
         .map(|_| ())
@@ -215,18 +267,24 @@ pub fn start_daemon() -> Result<(), String> {
 }
 
 #[cfg(not(windows))]
-pub fn stop_daemon() -> Result<(), String> {
+pub fn stop_daemon(target: Target) -> Result<(), String> {
+    if matches!(target, Target::Server) {
+        return Ok(());
+    }
     if systemd_unit_installed() {
         let _ = quiet_command("systemctl")
             .args(["--user", "stop", "yzendris-client.service"])
             .status();
     }
-    let _ = quiet_command("pkill").args(["-x", CLIENT_BIN]).output();
+    let _ = quiet_command("pkill").args(["-x", exe_name(target)]).output();
     Ok(())
 }
 
 #[cfg(not(windows))]
-pub fn read_log_tail(max_lines: usize) -> String {
+pub fn read_log_tail(target: Target, max_lines: usize) -> String {
+    if matches!(target, Target::Server) {
+        return "(el servidor solo corre en Windows)".to_owned();
+    }
     let out = quiet_command("journalctl")
         .args([
             "--user",
