@@ -176,18 +176,8 @@ pub fn start_daemon(target: Target) -> Result<(), String> {
     let mut cmd = quiet_command(bin.to_str().unwrap_or(exe));
     cmd.args(["--config", &config.to_string_lossy()]);
 
-    // The client logs to stdout/stderr (it has a console subsystem). Capture
-    // that into a log file the GUI can display. The server already logs to its
-    // own file internally.
-    if matches!(target, Target::Client) {
-        if let Ok(file) = std::fs::File::create(log_path(target)) {
-            if let Ok(err) = file.try_clone() {
-                cmd.stdout(std::process::Stdio::from(file));
-                cmd.stderr(std::process::Stdio::from(err));
-            }
-        }
-    }
-
+    // Both daemons log to their own file internally (server.log / client.log),
+    // so no stdout/stderr capture is needed here.
     cmd.spawn()
         .map(|_| ())
         .map_err(|e| format!("no se pudo iniciar {exe}: {e}"))
