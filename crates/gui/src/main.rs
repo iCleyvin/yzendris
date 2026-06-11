@@ -12,6 +12,7 @@ mod config_model;
 mod daemon;
 mod host_panel;
 mod monitors;
+mod setup;
 
 use eframe::egui;
 

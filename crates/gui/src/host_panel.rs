@@ -9,6 +9,7 @@ use crate::config_model::{
 };
 use crate::daemon;
 use crate::monitors::{self, MonitorInfo};
+use crate::setup;
 
 /// Where the laptop sits relative to this PC's monitors.
 #[derive(Debug, Clone, PartialEq)]
@@ -27,6 +28,7 @@ pub struct HostPanel {
     new_fingerprint: String,
     status_msg: String,
     monitor: daemon::DaemonMonitor,
+    setup_status: std::sync::Arc<std::sync::Mutex<Option<String>>>,
 }
 
 impl HostPanel {
@@ -42,6 +44,7 @@ impl HostPanel {
             new_fingerprint: String::new(),
             status_msg: String::new(),
             monitor: daemon::DaemonMonitor::new(daemon::Target::Server),
+            setup_status: std::sync::Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -183,6 +186,30 @@ impl HostPanel {
                 }
                 ui.add_space(10.0);
             }
+
+            // ── Instalación autosuficiente ──────────────────────────────────
+            ui.separator();
+            ui.heading("Instalación");
+            ui.label(
+                "Deja esta PC lista para usarse sola: copia el programa, abre el firewall \
+                 y lo arranca al iniciar Windows. Pide permiso de administrador una vez.",
+            );
+            if ui.button("⚙ Instalar y habilitar inicio automático").clicked() {
+                self.sync_layout_into_cfg();
+                let _ = config_model::save_server_config(&self.cfg);
+                let status_arc = self.setup_status.clone();
+                let port = self.cfg.port;
+                *status_arc.lock().unwrap() = Some("Instalando… (aprueba el aviso de administrador)".into());
+                std::thread::spawn(move || {
+                    let r = setup::enable(daemon::Target::Server, port);
+                    *status_arc.lock().unwrap() =
+                        Some(match r { Ok(m) => m, Err(e) => format!("✘ {e}") });
+                });
+            }
+            if let Some(msg) = self.setup_status.lock().unwrap().clone() {
+                ui.label(msg);
+            }
+            ui.add_space(8.0);
 
             // ── Control ─────────────────────────────────────────────────────
             ui.separator();

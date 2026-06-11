@@ -135,6 +135,11 @@ fn quiet_command(program: &str) -> std::process::Command {
     cmd
 }
 
+/// Public wrapper so the setup module can find a daemon binary to copy.
+pub fn locate_binary(name: &str) -> Option<PathBuf> {
+    find_daemon_binary(name)
+}
+
 /// Locate the daemon binary: next to the GUI exe → install dir → dev build.
 fn find_daemon_binary(name: &str) -> Option<PathBuf> {
     let mut candidates: Vec<PathBuf> = Vec::new();
