@@ -253,9 +253,29 @@ pub fn move_cursor(x: i32, y: i32) {
 }
 
 /// The primary screen resolution, for reporting to the host.
+///
+/// Uses `EnumDisplaySettingsW` (physical pixels) rather than `GetSystemMetrics`
+/// (logical pixels): a non-DPI-aware process gets DPI-scaled values from the
+/// latter — e.g. a 1920×1200 panel at 125 % scaling reads back as 1536×960.
+/// `dmPelsWidth/Height` is the real panel resolution, unaffected by scaling.
 pub fn screen_size() -> Option<(i32, i32)> {
-    use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN};
+    use windows::core::PCWSTR;
+    use windows::Win32::Graphics::Gdi::{
+        EnumDisplaySettingsW, DEVMODEW, ENUM_CURRENT_SETTINGS,
+    };
     unsafe {
+        let mut dm = DEVMODEW {
+            dmSize: std::mem::size_of::<DEVMODEW>() as u16,
+            ..Default::default()
+        };
+        if EnumDisplaySettingsW(PCWSTR::null(), ENUM_CURRENT_SETTINGS, &mut dm).as_bool() {
+            let (w, h) = (dm.dmPelsWidth as i32, dm.dmPelsHeight as i32);
+            if w > 0 && h > 0 {
+                return Some((w, h));
+            }
+        }
+        // Fallback: logical metrics (better than nothing).
+        use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN};
         let w = GetSystemMetrics(SM_CXSCREEN);
         let h = GetSystemMetrics(SM_CYSCREEN);
         if w > 0 && h > 0 {
