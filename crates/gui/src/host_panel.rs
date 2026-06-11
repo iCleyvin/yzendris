@@ -416,12 +416,16 @@ fn arrangement_editor(ui: &mut egui::Ui, monitors: &[MonitorInfo], clients: &mut
 
     let avg_w = monitors.iter().map(|m| m.width()).sum::<i32>() as f32 / monitors.len() as f32;
     let avg_h = monitors.iter().map(|m| m.height()).sum::<i32>() as f32 / monitors.len() as f32;
-    let box_w = (avg_w * 0.62).max(300.0);
-    let box_h = (avg_h * 0.62).max(220.0);
-    let margin = box_w.max(box_h) + avg_w * 0.12;
+    let slot_w = (avg_w * 0.7).max(350.0);
+    let slot_h = (avg_h * 0.7).max(260.0);
+    let pad = (avg_w * 0.06).max(40.0);
+    let box_w = slot_w;
+    let box_h = slot_h;
 
-    // Monitor rects in virtual coords.
-    let mon: Vec<egui::Rect> = monitors
+    // Monitor rects (mutable). We "explode" the arrangement: insert a real gap
+    // at every adjacent boundary so each client sits cleanly in a gap instead
+    // of overlapping the monitors.
+    let mut mon: Vec<egui::Rect> = monitors
         .iter()
         .map(|m| {
             egui::Rect::from_min_size(
@@ -430,36 +434,78 @@ fn arrangement_editor(ui: &mut egui::Ui, monitors: &[MonitorInfo], clients: &mut
             )
         })
         .collect();
-    let bbox = mon.iter().copied().reduce(|a, b| a.union(b)).unwrap();
-    let c = bbox.center();
 
-    // Candidate drop slots: (placement, virtual center).
-    let mut cands: Vec<(Placement, egui::Pos2)> = vec![
-        (Placement::Edge("left".into()), egui::pos2(bbox.min.x - margin, c.y)),
-        (Placement::Edge("right".into()), egui::pos2(bbox.max.x + margin, c.y)),
-        (Placement::Edge("top".into()), egui::pos2(c.x, bbox.min.y - margin)),
-        (Placement::Edge("bottom".into()), egui::pos2(c.x, bbox.max.y + margin)),
-    ];
-    for (i, j, _) in adjacent_pairs(monitors) {
-        let a = &monitors[i];
-        let b = &monitors[j];
-        let pos = if pair_is_stacked(a, b) {
-            let (t, bo) = if a.top <= b.top { (a, b) } else { (b, a) };
-            let bx = (t.left.max(bo.left) + t.right.min(bo.right)) as f32 / 2.0;
-            egui::pos2(bx, t.bottom as f32)
-        } else {
-            let (l, r) = if a.left <= b.left { (a, b) } else { (b, a) };
-            let by = (l.top.max(r.top) + l.bottom.min(r.bottom)) as f32 / 2.0;
-            egui::pos2(l.right as f32, by)
-        };
+    // Drop slots: (placement, virtual center).
+    let mut cands: Vec<(Placement, egui::Pos2)> = Vec::new();
+    let pairs = adjacent_pairs(monitors);
+
+    // Side-by-side gaps (vertical boundaries), left to right.
+    let mut sbs: Vec<(usize, usize)> = pairs
+        .iter()
+        .filter(|(i, j, _)| !pair_is_stacked(&monitors[*i], &monitors[*j]))
+        .map(|(i, j, _)| (*i, *j))
+        .collect();
+    sbs.sort_by_key(|(i, j)| monitors[*i].left.min(monitors[*j].left));
+    let gap_w = slot_w + 2.0 * pad;
+    for (i, j) in sbs {
+        let (l, r) = if monitors[i].left <= monitors[j].left { (i, j) } else { (j, i) };
+        let boundary_x = mon[l].max.x;
+        let band_cy = (mon[l].min.y.max(mon[r].min.y) + mon[l].max.y.min(mon[r].max.y)) / 2.0;
+        for m in mon.iter_mut() {
+            if m.min.x >= boundary_x - 1.0 {
+                *m = m.translate(egui::vec2(gap_w, 0.0));
+            }
+        }
+        for (_, p) in cands.iter_mut() {
+            if p.x >= boundary_x - 1.0 {
+                p.x += gap_w;
+            }
+        }
         cands.push((
             Placement::Between(monitors[i].device.clone(), monitors[j].device.clone()),
-            pos,
+            egui::pos2(boundary_x + gap_w / 2.0, band_cy),
         ));
     }
 
-    // Virtual area to fit, with room for the edge slots.
-    let total = bbox.expand2(egui::vec2(margin * 1.6, margin * 1.6));
+    // Stacked gaps (horizontal boundaries), top to bottom.
+    let mut stk: Vec<(usize, usize)> = pairs
+        .iter()
+        .filter(|(i, j, _)| pair_is_stacked(&monitors[*i], &monitors[*j]))
+        .map(|(i, j, _)| (*i, *j))
+        .collect();
+    stk.sort_by_key(|(i, j)| monitors[*i].top.min(monitors[*j].top));
+    let gap_h = slot_h + 2.0 * pad;
+    for (i, j) in stk {
+        let (t, bo) = if monitors[i].top <= monitors[j].top { (i, j) } else { (j, i) };
+        let boundary_y = mon[t].max.y;
+        let band_cx = (mon[t].min.x.max(mon[bo].min.x) + mon[t].max.x.min(mon[bo].max.x)) / 2.0;
+        for m in mon.iter_mut() {
+            if m.min.y >= boundary_y - 1.0 {
+                *m = m.translate(egui::vec2(0.0, gap_h));
+            }
+        }
+        for (_, p) in cands.iter_mut() {
+            if p.y >= boundary_y - 1.0 {
+                p.y += gap_h;
+            }
+        }
+        cands.push((
+            Placement::Between(monitors[i].device.clone(), monitors[j].device.clone()),
+            egui::pos2(band_cx, boundary_y + gap_h / 2.0),
+        ));
+    }
+
+    // Edge slots, outside the exploded bounding box.
+    let bbox = mon.iter().copied().reduce(|a, b| a.union(b)).unwrap();
+    let c = bbox.center();
+    let em = slot_w.max(slot_h) * 0.6 + pad;
+    cands.push((Placement::Edge("left".into()), egui::pos2(bbox.min.x - em, c.y)));
+    cands.push((Placement::Edge("right".into()), egui::pos2(bbox.max.x + em, c.y)));
+    cands.push((Placement::Edge("top".into()), egui::pos2(c.x, bbox.min.y - em)));
+    cands.push((Placement::Edge("bottom".into()), egui::pos2(c.x, bbox.max.y + em)));
+
+    // Virtual area to fit, with room for the edge slot boxes.
+    let total = bbox.expand2(egui::vec2(em + slot_w * 0.6, em + slot_h * 0.6));
     let canvas_size = egui::vec2(ui.available_width().min(580.0), 240.0);
     let (resp, painter) = ui.allocate_painter(canvas_size, egui::Sense::hover());
     let canvas = resp.rect.shrink(8.0);
