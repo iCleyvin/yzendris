@@ -100,14 +100,28 @@ impl HostPanel {
                     self.monitors = monitors::enumerate();
                 }
             });
-            ui.label("Arrastra una PANTALLA para reubicarla en Windows, o un CLIENTE (verde) a un lado de una pantalla o al hueco entre dos.");
-            if let Some(changes) = arrangement_editor(ui, &self.monitors, &mut self.cfg.clients) {
+            ui.label("Arrastra una PANTALLA para reubicarla en Windows, o un CLIENTE (verde) a un lado de una pantalla o al hueco entre dos. Los cambios se aplican al instante.");
+            let (reposition, client_changed) =
+                arrangement_editor(ui, &self.monitors, &mut self.cfg.clients);
+            let mut apply = client_changed;
+            if let Some(changes) = reposition {
                 match monitors::reposition(&changes) {
                     Ok(()) => {
                         self.monitors = monitors::enumerate();
-                        self.status_msg = "✔ Pantallas reubicadas en Windows".into();
+                        apply = true; // the server cached the old monitor layout
                     }
                     Err(e) => self.status_msg = format!("✘ No pude reubicar: {e}"),
+                }
+            }
+            if apply {
+                // Persist and restart the server so the running setup matches
+                // exactly what the diagram shows (new placement / monitor layout).
+                let _ = config_model::save_server_config(&self.cfg);
+                if status.running {
+                    daemon::restart_async(daemon::Target::Server);
+                    self.status_msg = "✔ Aplicado — reiniciando servidor…".into();
+                } else {
+                    self.status_msg = "✔ Aplicado".into();
                 }
             }
             ui.add_space(8.0);
@@ -444,14 +458,15 @@ fn placement_eq(a: &Placement, b: &Placement) -> bool {
 /// edge or the gap between two monitors to set how the cursor crosses into it.
 /// Monitors are shown at their real Windows positions so the picture matches
 /// reality.
+/// Returns `(monitor reposition to apply, whether a client's placement changed)`.
 fn arrangement_editor(
     ui: &mut egui::Ui,
     monitors: &[MonitorInfo],
     clients: &mut [ClientEntry],
-) -> Option<Vec<(String, i32, i32)>> {
+) -> (Option<Vec<(String, i32, i32)>>, bool) {
     if monitors.is_empty() {
         ui.label("(no se detectaron pantallas — disponible solo en Windows)");
-        return None;
+        return (None, false);
     }
 
     let avg_w = monitors.iter().map(|m| m.width()).sum::<i32>() as f32 / monitors.len() as f32;
@@ -576,6 +591,7 @@ fn arrangement_editor(
 
     // ── Clients first (they sit on top) ──────────────────────────────────────
     let mut client_busy = false;
+    let mut client_changed = false;
     let mut client_draws: Vec<(egui::Pos2, String, bool)> = Vec::new();
     for (ci, client) in clients.iter_mut().enumerate() {
         let cur = client_placement(client, monitors);
@@ -606,7 +622,11 @@ fn arrangement_editor(
         }
         if r.drag_stopped() {
             if let Some(pp) = r.interact_pointer_pos() {
-                set_placement(client, &cands[nearest(to_virtual(pp))].0);
+                let new_p = cands[nearest(to_virtual(pp))].0.clone();
+                if !placement_eq(&new_p, &cur) {
+                    set_placement(client, &new_p);
+                    client_changed = true;
+                }
             }
         }
         client_draws.push((draw_center, client.name.clone(), r.dragged()));
@@ -676,7 +696,7 @@ fn arrangement_editor(
         );
     }
 
-    reposition
+    (reposition, client_changed)
 }
 
 fn sr_size(r: egui::Rect, scale: f32) -> egui::Vec2 {
