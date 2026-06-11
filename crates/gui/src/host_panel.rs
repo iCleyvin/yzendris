@@ -456,13 +456,17 @@ fn arrangement_editor(
 
     let avg_w = monitors.iter().map(|m| m.width()).sum::<i32>() as f32 / monitors.len() as f32;
     let avg_h = monitors.iter().map(|m| m.height()).sum::<i32>() as f32 / monitors.len() as f32;
-    let badge_w = (avg_w * 0.5).max(260.0);
-    let badge_h = (avg_h * 0.28).max(120.0);
-    let off_x = badge_w * 0.5 + avg_w * 0.05;
-    let off_y = badge_h * 0.5 + avg_h * 0.08;
+    let badge_w = (avg_w * 0.55).max(280.0);
+    let badge_h = (avg_h * 0.30).max(140.0);
+    let pad = (avg_w * 0.05).max(35.0);
+    let gap_w = badge_w + 2.0 * pad;
+    let gap_h = badge_h + 2.0 * pad;
+    let off_x = badge_w * 0.5 + pad;
+    let off_y = badge_h * 0.5 + pad;
 
-    // Monitor rects at REAL positions.
-    let mon: Vec<egui::Rect> = monitors
+    // Monitor rects, "exploded": a real gap is inserted at every adjacency so
+    // clients sit cleanly in the gaps. `mon[idx]` stays aligned with `monitors`.
+    let mut mon: Vec<egui::Rect> = monitors
         .iter()
         .map(|m| {
             egui::Rect::from_min_size(
@@ -472,41 +476,68 @@ fn arrangement_editor(
         })
         .collect();
 
-    // Drop slots: (placement, virtual center).
     let mut cands: Vec<(Placement, egui::Pos2)> = Vec::new();
-    for (i, j, _) in adjacent_pairs(monitors) {
-        let (a, b) = (&monitors[i], &monitors[j]);
-        let pos = if pair_is_stacked(a, b) {
-            let (t, bo) = if a.top <= b.top { (a, b) } else { (b, a) };
-            egui::pos2(
-                (t.left.max(bo.left) + t.right.min(bo.right)) as f32 / 2.0,
-                t.bottom as f32,
-            )
-        } else {
-            let (l, r) = if a.left <= b.left { (a, b) } else { (b, a) };
-            egui::pos2(
-                l.right as f32,
-                (l.top.max(r.top) + l.bottom.min(r.bottom)) as f32 / 2.0,
-            )
-        };
+    let pairs = adjacent_pairs(monitors);
+
+    // Side-by-side gaps (left to right).
+    let mut sbs: Vec<(usize, usize)> = pairs
+        .iter()
+        .filter(|(i, j, _)| !pair_is_stacked(&monitors[*i], &monitors[*j]))
+        .map(|(i, j, _)| (*i, *j))
+        .collect();
+    sbs.sort_by_key(|(i, j)| monitors[*i].left.min(monitors[*j].left));
+    for (i, j) in sbs {
+        let (l, r) = if monitors[i].left <= monitors[j].left { (i, j) } else { (j, i) };
+        let bx = mon[l].max.x;
+        let band_cy = (mon[l].min.y.max(mon[r].min.y) + mon[l].max.y.min(mon[r].max.y)) / 2.0;
+        for m in mon.iter_mut() {
+            if m.min.x >= bx - 1.0 { *m = m.translate(egui::vec2(gap_w, 0.0)); }
+        }
+        for (_, p) in cands.iter_mut() {
+            if p.x >= bx - 1.0 { p.x += gap_w; }
+        }
         cands.push((
             Placement::Gap(monitors[i].device.clone(), monitors[j].device.clone()),
-            pos,
+            egui::pos2(bx + gap_w / 2.0, band_cy),
         ));
     }
+    // Stacked gaps (top to bottom).
+    let mut stk: Vec<(usize, usize)> = pairs
+        .iter()
+        .filter(|(i, j, _)| pair_is_stacked(&monitors[*i], &monitors[*j]))
+        .map(|(i, j, _)| (*i, *j))
+        .collect();
+    stk.sort_by_key(|(i, j)| monitors[*i].top.min(monitors[*j].top));
+    for (i, j) in stk {
+        let (t, bo) = if monitors[i].top <= monitors[j].top { (i, j) } else { (j, i) };
+        let by = mon[t].max.y;
+        let band_cx = (mon[t].min.x.max(mon[bo].min.x) + mon[t].max.x.min(mon[bo].max.x)) / 2.0;
+        for m in mon.iter_mut() {
+            if m.min.y >= by - 1.0 { *m = m.translate(egui::vec2(0.0, gap_h)); }
+        }
+        for (_, p) in cands.iter_mut() {
+            if p.y >= by - 1.0 { p.y += gap_h; }
+        }
+        cands.push((
+            Placement::Gap(monitors[i].device.clone(), monitors[j].device.clone()),
+            egui::pos2(band_cx, by + gap_h / 2.0),
+        ));
+    }
+
+    // Free-edge side slots, using the exploded rects.
     for idx in 0..monitors.len() {
-        let m = &monitors[idx];
-        let cx = (m.left + m.right) as f32 / 2.0;
-        let cy = (m.top + m.bottom) as f32 / 2.0;
+        let r = mon[idx];
+        let cx = r.center().x;
+        let cy = r.center().y;
         let free = monitors::free_sides(monitors, idx);
         for (e, k, pos) in [
-            ("right", 0usize, egui::pos2(m.right as f32 + off_x, cy)),
-            ("left", 1, egui::pos2(m.left as f32 - off_x, cy)),
-            ("bottom", 2, egui::pos2(cx, m.bottom as f32 + off_y)),
-            ("top", 3, egui::pos2(cx, m.top as f32 - off_y)),
+            ("right", 0usize, egui::pos2(r.max.x + off_x, cy)),
+            ("left", 1, egui::pos2(r.min.x - off_x, cy)),
+            ("bottom", 2, egui::pos2(cx, r.max.y + off_y)),
+            ("top", 3, egui::pos2(cx, r.min.y - off_y)),
         ] {
             if free[k] {
-                cands.push((Placement::Side(m.device.clone(), e.into()), pos));
+                cands.push((Placement::Side(monitors[idx].device.clone(), e.into()), pos));
             }
         }
     }
@@ -599,7 +630,7 @@ fn arrangement_editor(
             }
             if r.drag_stopped() {
                 if let Some(pp) = r.interact_pointer_pos() {
-                    reposition = Some(monitor_drop_positions(monitors, mi, to_virtual(pp)));
+                    reposition = Some(monitor_drop_positions(monitors, &mon, mi, to_virtual(pp)));
                 }
             }
         }
@@ -652,24 +683,27 @@ fn sr_size(r: egui::Rect, scale: f32) -> egui::Vec2 {
     egui::vec2(r.width() * scale, r.height() * scale)
 }
 
-/// New positions for all monitors after dropping monitor `m_idx` near another
-/// monitor: snaps M to a side of the nearest other monitor, then normalizes so
-/// the primary is at (0,0) (Windows requires this).
+/// New positions for all monitors after dropping monitor `m_idx`. The DROP and
+/// `mon_display` are in the exploded diagram space (used to pick the nearest
+/// monitor and side); the resulting positions are REAL Windows coords adjacent
+/// to that monitor, normalized so the primary ends at (0,0).
 fn monitor_drop_positions(
     monitors: &[MonitorInfo],
+    mon_display: &[egui::Rect],
     m_idx: usize,
     drop: egui::Pos2,
 ) -> Vec<(String, i32, i32)> {
     let mut pos: Vec<(i32, i32)> = monitors.iter().map(|m| (m.left, m.top)).collect();
 
+    // Nearest other monitor + side, judged in the exploded diagram.
     let n_idx = (0..monitors.len())
         .filter(|&k| k != m_idx)
-        .min_by_key(|&k| {
-            let cx = (monitors[k].left + monitors[k].right) / 2;
-            let cy = (monitors[k].top + monitors[k].bottom) / 2;
-            let dx = drop.x as i32 - cx;
-            let dy = drop.y as i32 - cy;
-            (dx * dx + dy * dy) as i64
+        .min_by(|&a, &b| {
+            mon_display[a]
+                .center()
+                .distance_sq(drop)
+                .partial_cmp(&mon_display[b].center().distance_sq(drop))
+                .unwrap()
         });
     let Some(n) = n_idx else {
         return Vec::new();
@@ -677,13 +711,13 @@ fn monitor_drop_positions(
 
     let m = &monitors[m_idx];
     let nn = &monitors[n];
-    let ncx = (nn.left + nn.right) / 2;
-    let ncy = (nn.top + nn.bottom) / 2;
-    let dx = drop.x as i32 - ncx;
-    let dy = drop.y as i32 - ncy;
+    let nc = mon_display[n].center();
+    let dx = drop.x - nc.x;
+    let dy = drop.y - nc.y;
+    // Snap M adjacent to the REAL monitor N on the chosen side, edges aligned.
     pos[m_idx] = if dx.abs() >= dy.abs() {
-        if dx >= 0 { (nn.right, nn.top) } else { (nn.left - m.width(), nn.top) }
-    } else if dy >= 0 {
+        if dx >= 0.0 { (nn.right, nn.top) } else { (nn.left - m.width(), nn.top) }
+    } else if dy >= 0.0 {
         (nn.left, nn.bottom)
     } else {
         (nn.left, nn.top - m.height())
