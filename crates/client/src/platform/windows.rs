@@ -126,14 +126,20 @@ fn send(inputs: &[INPUT]) {
 }
 
 pub struct Injector {
-    /// Track scancodes we've pressed (for release_all on disconnect).
+    /// Scancodes we've pressed (for release_all on disconnect).
     held: std::collections::HashSet<(u16, bool)>,
+    /// Mouse buttons (evdev BTN_* codes) currently pressed. Tracked so we only
+    /// ever release buttons that are actually down — on Windows a bare button-up
+    /// (e.g. RIGHTUP without RIGHTDOWN) is acted on as a click, which produced
+    /// phantom context menus / back-forward on every hand-off.
+    held_buttons: std::collections::HashSet<u16>,
 }
 
 impl Injector {
     pub fn new() -> Result<Self> {
         Ok(Self {
             held: std::collections::HashSet::new(),
+            held_buttons: std::collections::HashSet::new(),
         })
     }
 
@@ -158,6 +164,11 @@ impl Injector {
             }
             Event::MouseButton { btn, pressed } => {
                 if let Some((down, up, xdata)) = evdev_button(*btn) {
+                    if *pressed {
+                        self.held_buttons.insert(*btn);
+                    } else {
+                        self.held_buttons.remove(btn);
+                    }
                     let flag = if *pressed { down } else { up };
                     send(&[mouse_input(0, 0, xdata, flag)]);
                 }
@@ -173,14 +184,18 @@ impl Injector {
                 send(&evs);
             }
             Event::SyncKeys { keycodes_down } => {
-                let ups: Vec<INPUT> = keycodes_down
-                    .iter()
-                    .filter_map(|&c| evdev_to_scancode(c))
-                    .map(|(sc, ext)| {
+                // Release the keys/buttons the server says are held — and only
+                // those (never a blanket release).
+                let mut ups: Vec<INPUT> = Vec::new();
+                for &c in keycodes_down {
+                    if let Some((sc, ext)) = evdev_to_scancode(c) {
                         self.held.remove(&(sc, ext));
-                        key_input(sc, ext, true)
-                    })
-                    .collect();
+                        ups.push(key_input(sc, ext, true));
+                    } else if let Some((_d, up, xdata)) = evdev_button(c) {
+                        self.held_buttons.remove(&c);
+                        ups.push(mouse_input(0, 0, xdata, up));
+                    }
+                }
                 send(&ups);
             }
             Event::CaptureStart
@@ -195,22 +210,21 @@ impl Injector {
         Ok(true)
     }
 
-    /// Release everything still marked as held (on CaptureEnd / disconnect).
+    /// Release everything we actually pressed (on CaptureEnd / disconnect).
+    /// Only releases keys/buttons we tracked as down — releasing a button that
+    /// isn't pressed makes Windows act on a phantom click.
     pub fn release_all(&mut self) -> Result<()> {
-        let ups: Vec<INPUT> = self
+        let mut ups: Vec<INPUT> = self
             .held
             .drain()
             .map(|(sc, ext)| key_input(sc, ext, true))
             .collect();
+        for btn in self.held_buttons.drain() {
+            if let Some((_down, up, xdata)) = evdev_button(btn) {
+                ups.push(mouse_input(0, 0, xdata, up));
+            }
+        }
         send(&ups);
-        // Also release every mouse button, in case one was held.
-        send(&[
-            mouse_input(0, 0, 0, MOUSEEVENTF_LEFTUP),
-            mouse_input(0, 0, 0, MOUSEEVENTF_RIGHTUP),
-            mouse_input(0, 0, 0, MOUSEEVENTF_MIDDLEUP),
-            mouse_input(0, 0, XBUTTON1, MOUSEEVENTF_XUP),
-            mouse_input(0, 0, XBUTTON2, MOUSEEVENTF_XUP),
-        ]);
         Ok(())
     }
 }
