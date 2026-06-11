@@ -74,7 +74,10 @@ impl DaemonMonitor {
             .name("yzendris-daemon-monitor".into())
             .spawn(move || loop {
                 let running = daemon_running(target);
-                let log = read_log_tail(target, 14);
+                // Read a generous tail so connection events (which may be older
+                // than the latest capture activity) are still visible for the
+                // per-client status indicators.
+                let log = read_log_tail(target, 60);
                 if let Ok(mut s) = shared.lock() {
                     *s = DaemonState { running, log };
                 }

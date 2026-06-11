@@ -72,6 +72,26 @@ impl HostPanel {
         }
 
         egui::ScrollArea::vertical().show(ui, |ui| {
+            // ── Estado en vivo (arriba, para que se vea de un vistazo) ───────
+            egui::Frame::group(ui.style()).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    if status.running {
+                        let total = self.cfg.clients.len();
+                        let connected = (0..total)
+                            .filter(|&i| matches!(client_link_state(&status.log, i), LinkState::Connected))
+                            .count();
+                        ui.colored_label(egui::Color32::GREEN, "●");
+                        ui.strong("Servidor en ejecución");
+                        ui.label(format!("· {connected}/{total} cliente(s) conectado(s)"));
+                    } else {
+                        ui.colored_label(egui::Color32::GRAY, "○");
+                        ui.strong("Servidor detenido");
+                        ui.label("· usa «Iniciar servidor» abajo");
+                    }
+                });
+            });
+            ui.add_space(6.0);
+
             // ── Pantallas ───────────────────────────────────────────────────
             ui.horizontal(|ui| {
                 ui.heading("Pantallas de esta PC");
@@ -97,6 +117,13 @@ impl HostPanel {
                 egui::Frame::group(ui.style()).show(ui, |ui| {
                     let c = &mut self.cfg.clients[i];
                     ui.horizontal(|ui| {
+                        // Per-client connection indicator (from the server log).
+                        let (dot, col, tip) = match client_link_state(&status.log, i) {
+                            LinkState::Connected => ("●", egui::Color32::GREEN, "conectado"),
+                            LinkState::Connecting => ("◐", egui::Color32::YELLOW, "conectando…"),
+                            LinkState::Down => ("○", egui::Color32::GRAY, "sin conexión"),
+                        };
+                        ui.colored_label(col, dot).on_hover_text(tip);
                         ui.label("Nombre:");
                         ui.add(egui::TextEdit::singleline(&mut c.name).desired_width(140.0));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -248,6 +275,40 @@ impl HostPanel {
             });
         });
     }
+}
+
+// ─── Live status from the server log ─────────────────────────────────────────
+
+#[derive(Clone, Copy)]
+enum LinkState {
+    Connected,
+    Connecting,
+    Down,
+}
+
+/// Latest connection state for client `id`, parsed from the server log. Net
+/// lines are tagged "[client N]"; capture lines say "client N" (no brackets),
+/// so they don't interfere.
+fn client_link_state(log: &str, id: usize) -> LinkState {
+    let marker = format!("[client {id}]");
+    let mut state = LinkState::Down;
+    for line in log.lines() {
+        if !line.contains(&marker) {
+            continue;
+        }
+        if line.contains("connected to") {
+            state = LinkState::Connected;
+        } else if line.contains("connecting to") {
+            state = LinkState::Connecting;
+        } else if line.contains("disconnected")
+            || line.contains("connect failed")
+            || line.contains("connection error")
+            || line.contains("TLS handshake")
+        {
+            state = LinkState::Down;
+        }
+    }
+    state
 }
 
 // ─── Placement helpers ───────────────────────────────────────────────────────
