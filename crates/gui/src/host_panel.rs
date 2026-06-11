@@ -1,29 +1,26 @@
-//! Host (Windows server) configuration panel: connection settings, screen
-//! arrangement with laptop placement, TLS pairing, daemon control and log.
+//! Host (Windows server) panel: the screen arrangement, the list of clients
+//! and where each one sits, TLS pairing, one-click install, and daemon control.
 use std::time::Duration;
 
 use eframe::egui;
 
-use crate::config_model::{
-    self, LayoutConfig, ServerConfig,
-};
+use crate::config_model::{self, ClientEntry, ServerConfig};
 use crate::daemon;
 use crate::monitors::{self, MonitorInfo};
 use crate::setup;
 
-/// Where the laptop sits relative to this PC's monitors.
-#[derive(Debug, Clone, PartialEq)]
-pub enum LaptopPos {
-    /// Outer edge of the whole desktop: "right" | "left" | "top" | "bottom".
+/// Where a client sits relative to the host monitors.
+#[derive(Clone, PartialEq)]
+enum Placement {
+    /// Between two monitors (device names); orientation inferred from geometry.
+    Between(String, String),
+    /// Outer edge of the whole desktop.
     Edge(String),
-    /// Between two adjacent monitors (indices into the sorted monitor list).
-    Between(usize, usize),
 }
 
 pub struct HostPanel {
     cfg: ServerConfig,
     monitors: Vec<MonitorInfo>,
-    laptop_pos: LaptopPos,
     trusted: Vec<String>,
     new_fingerprint: String,
     status_msg: String,
@@ -33,13 +30,9 @@ pub struct HostPanel {
 
 impl HostPanel {
     pub fn new() -> Self {
-        let cfg = config_model::load_server_config();
-        let monitors = monitors::enumerate();
-        let laptop_pos = laptop_pos_from_config(&cfg, &monitors);
         Self {
-            cfg,
-            monitors,
-            laptop_pos,
+            cfg: config_model::load_server_config(),
+            monitors: monitors::enumerate(),
             trusted: config_model::load_trusted_peers(),
             new_fingerprint: String::new(),
             status_msg: String::new(),
@@ -48,32 +41,10 @@ impl HostPanel {
         }
     }
 
-    /// Apply the chosen laptop position to the config struct.
-    fn sync_layout_into_cfg(&mut self) {
-        match &self.laptop_pos {
-            LaptopPos::Edge(edge) => {
-                self.cfg.edge = edge.clone();
-                self.cfg.layout = None;
-            }
-            LaptopPos::Between(i, j) => {
-                let (Some(a), Some(b)) = (self.monitors.get(*i), self.monitors.get(*j)) else {
-                    return;
-                };
-                self.cfg.layout = Some(LayoutConfig {
-                    mode: "between".into(),
-                    monitor_left: a.device.clone(),
-                    monitor_right: b.device.clone(),
-                });
-            }
-        }
-    }
-
     fn save(&mut self, running: bool) {
-        self.sync_layout_into_cfg();
         match config_model::save_server_config(&self.cfg) {
             Ok(()) => {
                 if running {
-                    // Restart happens on a background thread — UI stays responsive.
                     daemon::restart_async(daemon::Target::Server);
                     self.status_msg = "✔ Guardado, reiniciando servidor…".into();
                 } else {
@@ -82,6 +53,10 @@ impl HostPanel {
             }
             Err(e) => self.status_msg = format!("✘ Error al guardar: {e}"),
         }
+    }
+
+    fn any_tls(&self) -> bool {
+        self.cfg.clients.iter().any(|c| c.tls)
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui) {
@@ -97,66 +72,87 @@ impl HostPanel {
         }
 
         egui::ScrollArea::vertical().show(ui, |ui| {
-            // ── Conexión ────────────────────────────────────────────────────
-            ui.heading("Conexión");
-            egui::Grid::new("conn_grid").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
-                ui.label("IP del cliente (laptop):");
-                ui.text_edit_singleline(&mut self.cfg.client_addr);
-                ui.end_row();
-
-                ui.label("Puerto:");
-                ui.add(egui::DragValue::new(&mut self.cfg.port).range(1..=65535));
-                ui.end_row();
-
-                ui.label("Portapapeles compartido:");
-                ui.checkbox(&mut self.cfg.clipboard, "");
-                ui.end_row();
-
-                ui.label("TLS (cifrado + pairing):");
-                ui.checkbox(&mut self.cfg.tls, "");
-                ui.end_row();
-            });
-
-            ui.add_space(10.0);
-
-            // ── Disposición de pantallas ────────────────────────────────────
+            // ── Pantallas ───────────────────────────────────────────────────
             ui.horizontal(|ui| {
-                ui.heading("Posición del laptop");
-                if ui.small_button("⟳ redetectar pantallas").clicked() {
+                ui.heading("Pantallas de esta PC");
+                if ui.small_button("⟳ redetectar").clicked() {
                     self.monitors = monitors::enumerate();
-                    self.laptop_pos = laptop_pos_from_config(&self.cfg, &self.monitors);
                 }
             });
-            ui.label("¿Dónde está físicamente el laptop respecto a las pantallas de esta PC?");
+            draw_monitors(ui, &self.monitors);
+            ui.add_space(8.0);
+
+            // ── Clientes ────────────────────────────────────────────────────
+            ui.heading("Clientes");
+            ui.label(
+                "Cada equipo que recibe el teclado y mouse, y por dónde se entra a él \
+                 (entre dos pantallas, o por un borde).",
+            );
             ui.add_space(4.0);
 
-            // Options: the laptop between any two ADJACENT monitors (side by
-            // side OR stacked), plus the four outer edges.
-            for (i, j, kind) in adjacent_pairs(&self.monitors) {
-                let label = format!(
-                    "Entre la pantalla {} y la {} ({kind})",
-                    self.monitors[i].number(),
-                    self.monitors[j].number(),
-                );
-                ui.radio_value(&mut self.laptop_pos, LaptopPos::Between(i, j), label);
+            let options = placement_options(&self.monitors);
+            let mut remove: Option<usize> = None;
+            let n = self.cfg.clients.len();
+            for i in 0..n {
+                egui::Frame::group(ui.style()).show(ui, |ui| {
+                    let c = &mut self.cfg.clients[i];
+                    ui.horizontal(|ui| {
+                        ui.label("Nombre:");
+                        ui.add(egui::TextEdit::singleline(&mut c.name).desired_width(140.0));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if n > 1 && ui.button("🗑 Quitar").clicked() {
+                                remove = Some(i);
+                            }
+                        });
+                    });
+                    egui::Grid::new(("client_grid", i)).num_columns(2).spacing([10.0, 5.0]).show(ui, |ui| {
+                        ui.label("IP del cliente:");
+                        ui.text_edit_singleline(&mut c.addr);
+                        ui.end_row();
+
+                        ui.label("Puerto:");
+                        ui.add(egui::DragValue::new(&mut c.port).range(1..=65535));
+                        ui.end_row();
+
+                        ui.label("TLS:");
+                        ui.checkbox(&mut c.tls, "");
+                        ui.end_row();
+
+                        ui.label("Posición:");
+                        let current = client_placement(c);
+                        let current_label = placement_label(&self.monitors, &current);
+                        egui::ComboBox::from_id_salt(("placement", i))
+                            .selected_text(current_label)
+                            .width(300.0)
+                            .show_ui(ui, |ui| {
+                                for opt in &options {
+                                    let label = placement_label(&self.monitors, opt);
+                                    let mut sel = current.clone();
+                                    if ui.selectable_value(&mut sel, opt.clone(), label).clicked() {
+                                        set_placement(c, opt);
+                                    }
+                                }
+                            });
+                        ui.end_row();
+                    });
+                });
+                ui.add_space(4.0);
             }
-            for (edge, label) in [
-                ("right", "Al borde derecho de todo"),
-                ("left", "Al borde izquierdo de todo"),
-                ("top", "Arriba de todo"),
-                ("bottom", "Abajo de todo"),
-            ] {
-                ui.radio_value(&mut self.laptop_pos, LaptopPos::Edge(edge.into()), label);
+            if let Some(i) = remove {
+                self.cfg.clients.remove(i);
+            }
+            if ui.button("➕ Agregar cliente").clicked() {
+                self.cfg.clients.push(ClientEntry::default());
             }
 
-            ui.add_space(6.0);
-            draw_arrangement(ui, &self.monitors, &self.laptop_pos);
-            ui.add_space(10.0);
+            ui.add_space(8.0);
+            ui.checkbox(&mut self.cfg.clipboard, "Compartir portapapeles");
 
             // ── TLS pairing ─────────────────────────────────────────────────
-            if self.cfg.tls {
+            if self.any_tls() {
+                ui.add_space(10.0);
                 ui.heading("Huellas TLS confiables");
-                ui.label("Pega aquí la huella que muestra el cliente (panel Cliente) al activar TLS:");
+                ui.label("Pega la huella que muestra cada cliente (panel Cliente) al activar TLS:");
                 ui.horizontal(|ui| {
                     ui.add(
                         egui::TextEdit::singleline(&mut self.new_fingerprint)
@@ -172,34 +168,33 @@ impl HostPanel {
                         }
                     }
                 });
-                let mut remove: Option<usize> = None;
+                let mut remove_fp: Option<usize> = None;
                 for (i, fp) in self.trusted.iter().enumerate() {
                     ui.horizontal(|ui| {
                         ui.monospace(shorten(fp, 56));
                         if ui.small_button("🗑").clicked() {
-                            remove = Some(i);
+                            remove_fp = Some(i);
                         }
                     });
                 }
-                if let Some(i) = remove {
+                if let Some(i) = remove_fp {
                     self.trusted.remove(i);
                     let _ = config_model::save_trusted_peers(&self.trusted);
                 }
-                ui.add_space(10.0);
             }
 
             // ── Instalación autosuficiente ──────────────────────────────────
+            ui.add_space(10.0);
             ui.separator();
             ui.heading("Instalación");
             ui.label(
-                "Deja esta PC lista para usarse sola: copia el programa, abre el firewall \
-                 y lo arranca al iniciar Windows. Pide permiso de administrador una vez.",
+                "Deja esta PC lista sola: copia el programa, abre el firewall y lo arranca al \
+                 iniciar Windows. Pide permiso de administrador una vez.",
             );
             if ui.button("⚙ Instalar y habilitar inicio automático").clicked() {
-                self.sync_layout_into_cfg();
                 let _ = config_model::save_server_config(&self.cfg);
                 let status_arc = self.setup_status.clone();
-                let port = self.cfg.port;
+                let port = self.cfg.clients.first().map(|c| c.port).unwrap_or(7547);
                 *status_arc.lock().unwrap() = Some("Instalando… (aprueba el aviso de administrador)".into());
                 std::thread::spawn(move || {
                     let r = setup::enable(daemon::Target::Server, port);
@@ -224,7 +219,6 @@ impl HostPanel {
                         self.status_msg = "Deteniendo servidor…".into();
                     }
                 } else if ui.button("▶ Iniciar servidor").clicked() {
-                    self.sync_layout_into_cfg();
                     let _ = config_model::save_server_config(&self.cfg);
                     daemon::start_async(daemon::Target::Server);
                     self.status_msg = "Iniciando servidor…".into();
@@ -242,7 +236,6 @@ impl HostPanel {
                 ui.label(&self.status_msg);
             }
 
-            // ── Log ─────────────────────────────────────────────────────────
             ui.add_space(8.0);
             ui.collapsing("Registro del servidor", |ui| {
                 egui::ScrollArea::vertical()
@@ -257,8 +250,89 @@ impl HostPanel {
     }
 }
 
-/// Whether two monitors are stacked (share a horizontal edge), as opposed to
-/// side by side (share a vertical edge). Matches the server's orientation rule.
+// ─── Placement helpers ───────────────────────────────────────────────────────
+
+fn client_placement(c: &ClientEntry) -> Placement {
+    if let Some(b) = c.between.as_ref().filter(|b| b.len() == 2) {
+        Placement::Between(b[0].clone(), b[1].clone())
+    } else {
+        Placement::Edge(c.edge.clone().unwrap_or_else(|| "right".into()))
+    }
+}
+
+fn set_placement(c: &mut ClientEntry, p: &Placement) {
+    match p {
+        Placement::Between(a, b) => {
+            c.between = Some(vec![a.clone(), b.clone()]);
+            c.edge = None;
+        }
+        Placement::Edge(e) => {
+            c.edge = Some(e.clone());
+            c.between = None;
+        }
+    }
+}
+
+fn monitor_number(monitors: &[MonitorInfo], device: &str) -> String {
+    let want = device.trim().trim_start_matches(r"\\.\").to_uppercase();
+    monitors
+        .iter()
+        .find(|m| {
+            let d = m.device.to_uppercase();
+            d == want || d == format!("DISPLAY{want}")
+        })
+        .map(|m| m.number())
+        .unwrap_or_else(|| device.to_owned())
+}
+
+fn placement_label(monitors: &[MonitorInfo], p: &Placement) -> String {
+    match p {
+        Placement::Between(a, b) => {
+            let na = monitor_number(monitors, a);
+            let nb = monitor_number(monitors, b);
+            let kind = pair_kind(monitors, a, b);
+            format!("Entre pantalla {na} y {nb}{kind}")
+        }
+        Placement::Edge(e) => match e.as_str() {
+            "left" => "Borde izquierdo de todo".into(),
+            "top" => "Arriba de todo".into(),
+            "bottom" => "Abajo de todo".into(),
+            _ => "Borde derecho de todo".into(),
+        },
+    }
+}
+
+/// " (lado a lado)" / " (apiladas)" suffix for a between-pair, or "" if unknown.
+fn pair_kind(monitors: &[MonitorInfo], a: &str, b: &str) -> String {
+    let find = |name: &str| {
+        let want = name.trim().trim_start_matches(r"\\.\").to_uppercase();
+        monitors.iter().find(|m| {
+            let d = m.device.to_uppercase();
+            d == want || d == format!("DISPLAY{want}")
+        })
+    };
+    match (find(a), find(b)) {
+        (Some(x), Some(y)) if pair_is_stacked(x, y) => " (apiladas)".into(),
+        (Some(_), Some(_)) => " (lado a lado)".into(),
+        _ => String::new(),
+    }
+}
+
+/// All placement options: every adjacent monitor pair + the four outer edges.
+fn placement_options(monitors: &[MonitorInfo]) -> Vec<Placement> {
+    let mut out = Vec::new();
+    for (i, j, _) in adjacent_pairs(monitors) {
+        out.push(Placement::Between(
+            monitors[i].device.clone(),
+            monitors[j].device.clone(),
+        ));
+    }
+    for e in ["right", "left", "top", "bottom"] {
+        out.push(Placement::Edge(e.into()));
+    }
+    out
+}
+
 fn pair_is_stacked(a: &MonitorInfo, b: &MonitorInfo) -> bool {
     let y_ov = (a.top.max(b.top) < a.bottom.min(b.bottom)) as i32
         * (a.bottom.min(b.bottom) - a.top.max(b.top));
@@ -267,8 +341,6 @@ fn pair_is_stacked(a: &MonitorInfo, b: &MonitorInfo) -> bool {
     x_ov > y_ov
 }
 
-/// All pairs of monitors that share an edge, with a human label for the
-/// orientation. Used to offer every valid spot to place the laptop.
 fn adjacent_pairs(monitors: &[MonitorInfo]) -> Vec<(usize, usize, &'static str)> {
     let mut out = Vec::new();
     for i in 0..monitors.len() {
@@ -289,41 +361,16 @@ fn adjacent_pairs(monitors: &[MonitorInfo]) -> Vec<(usize, usize, &'static str)>
     out
 }
 
-/// Reverse-map the saved config to a UI position choice.
-fn laptop_pos_from_config(cfg: &ServerConfig, monitors: &[MonitorInfo]) -> LaptopPos {
-    if let Some(layout) = cfg.layout.as_ref().filter(|l| l.mode == "between") {
-        let find = |name: &str| {
-            let wanted = name.trim().trim_start_matches(r"\\.\").to_uppercase();
-            monitors.iter().position(|m| {
-                let dev = m.device.to_uppercase();
-                dev == wanted || dev == format!("DISPLAY{wanted}")
-            })
-        };
-        if let (Some(i), Some(j)) = (find(&layout.monitor_left), find(&layout.monitor_right)) {
-            return LaptopPos::Between(i.min(j), i.max(j));
-        }
-        // Names not found (monitors changed) — default to first pair.
-        if monitors.len() >= 2 {
-            return LaptopPos::Between(0, 1);
-        }
-    }
-    LaptopPos::Edge(cfg.edge.clone())
-}
+// ─── Monitor diagram ─────────────────────────────────────────────────────────
 
-/// Paint a scaled diagram of the monitor arrangement with the laptop slot.
-fn draw_arrangement(ui: &mut egui::Ui, monitors: &[MonitorInfo], pos: &LaptopPos) {
+/// Draw the real monitor arrangement, numbered, to scale.
+fn draw_monitors(ui: &mut egui::Ui, monitors: &[MonitorInfo]) {
     if monitors.is_empty() {
         ui.label("(no se detectaron pantallas — disponible solo en Windows)");
         return;
     }
 
-    // Virtual-space rects: monitors plus a representative laptop rect.
-    let laptop_w = 1600.0_f32;
-    let laptop_h = 1000.0_f32;
-    let gap = 60.0_f32;
-
-    // Base monitor rects in virtual coords.
-    let mut rects: Vec<(egui::Rect, String, bool)> = monitors
+    let rects: Vec<(egui::Rect, String)> = monitors
         .iter()
         .map(|m| {
             (
@@ -332,93 +379,17 @@ fn draw_arrangement(ui: &mut egui::Ui, monitors: &[MonitorInfo], pos: &LaptopPos
                     egui::vec2(m.width() as f32, m.height() as f32),
                 ),
                 format!("{}\n{}×{}", m.number(), m.width(), m.height()),
-                false,
             )
         })
         .collect();
 
-    // Insert the laptop and shift monitors for the "between" visualization.
-    let bbox = rects
-        .iter()
-        .map(|(r, _, _)| *r)
-        .reduce(|a, b| a.union(b))
-        .unwrap();
-
-    match pos {
-        LaptopPos::Between(i, j) if *i < monitors.len() && *j < monitors.len() => {
-            let a = &monitors[*i];
-            let b = &monitors[*j];
-            if pair_is_stacked(a, b) {
-                // Vertical gap: insert the laptop between top and bottom, shift
-                // everything below the boundary downward.
-                let (t, bo) = if a.top <= b.top { (a, b) } else { (b, a) };
-                let boundary = t.bottom as f32;
-                for (r, _, _) in rects.iter_mut() {
-                    if r.min.y >= boundary - 1.0 {
-                        *r = r.translate(egui::vec2(0.0, laptop_h + 2.0 * gap));
-                    }
-                }
-                let band_cx = (t.left.max(bo.left) + t.right.min(bo.right)) as f32 / 2.0;
-                rects.push((
-                    egui::Rect::from_center_size(
-                        egui::pos2(band_cx, boundary + gap + laptop_h / 2.0),
-                        egui::vec2(laptop_w, laptop_h),
-                    ),
-                    "Laptop".into(),
-                    true,
-                ));
-            } else {
-                // Horizontal gap: insert between left and right.
-                let (l, r_mon) = if a.left <= b.left { (a, b) } else { (b, a) };
-                let boundary = l.right as f32;
-                for (r, _, _) in rects.iter_mut() {
-                    if r.min.x >= boundary - 1.0 {
-                        *r = r.translate(egui::vec2(laptop_w + 2.0 * gap, 0.0));
-                    }
-                }
-                let band_cy = (l.top.max(r_mon.top) + l.bottom.min(r_mon.bottom)) as f32 / 2.0;
-                rects.push((
-                    egui::Rect::from_center_size(
-                        egui::pos2(boundary + gap + laptop_w / 2.0, band_cy),
-                        egui::vec2(laptop_w, laptop_h),
-                    ),
-                    "Laptop".into(),
-                    true,
-                ));
-            }
-        }
-        LaptopPos::Edge(edge) => {
-            let center = bbox.center();
-            let lap_rect = match edge.as_str() {
-                "left" => egui::Rect::from_center_size(
-                    egui::pos2(bbox.min.x - gap - laptop_w / 2.0, center.y),
-                    egui::vec2(laptop_w, laptop_h),
-                ),
-                "top" => egui::Rect::from_center_size(
-                    egui::pos2(center.x, bbox.min.y - gap - laptop_h / 2.0),
-                    egui::vec2(laptop_w, laptop_h),
-                ),
-                "bottom" => egui::Rect::from_center_size(
-                    egui::pos2(center.x, bbox.max.y + gap + laptop_h / 2.0),
-                    egui::vec2(laptop_w, laptop_h),
-                ),
-                _ => egui::Rect::from_center_size(
-                    egui::pos2(bbox.max.x + gap + laptop_w / 2.0, center.y),
-                    egui::vec2(laptop_w, laptop_h),
-                ),
-            };
-            rects.push((lap_rect, "Laptop".into(), true));
-        }
-        _ => {}
-    }
-
-    // Fit everything into the canvas.
     let total = rects
         .iter()
-        .map(|(r, _, _)| *r)
+        .map(|(r, _)| *r)
         .reduce(|a, b| a.union(b))
         .unwrap();
-    let canvas_size = egui::vec2(ui.available_width().min(560.0), 170.0);
+
+    let canvas_size = egui::vec2(ui.available_width().min(560.0), 150.0);
     let (resp, painter) = ui.allocate_painter(canvas_size, egui::Sense::hover());
     let canvas = resp.rect.shrink(8.0);
     let scale = (canvas.width() / total.width())
@@ -433,24 +404,13 @@ fn draw_arrangement(ui: &mut egui::Ui, monitors: &[MonitorInfo], pos: &LaptopPos
         )
     };
 
-    for (r, label, is_laptop) in &rects {
+    for (r, label) in &rects {
         let sr = to_screen(r);
-        let (fill, stroke_col) = if *is_laptop {
-            (
-                egui::Color32::from_rgb(35, 110, 65),
-                egui::Color32::from_rgb(110, 230, 150),
-            )
-        } else {
-            (
-                egui::Color32::from_gray(45),
-                egui::Color32::from_gray(140),
-            )
-        };
-        painter.rect_filled(sr, 4.0, fill);
+        painter.rect_filled(sr, 4.0, egui::Color32::from_gray(45));
         painter.rect_stroke(
             sr,
             4.0,
-            egui::Stroke::new(1.5, stroke_col),
+            egui::Stroke::new(1.5, egui::Color32::from_gray(140)),
             egui::StrokeKind::Inside,
         );
         painter.text(
@@ -467,7 +427,6 @@ fn shorten(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         s.to_owned()
     } else {
-        // Take by chars, not bytes, so we never slice through a UTF-8 boundary.
         format!("{}…", s.chars().take(max).collect::<String>())
     }
 }
