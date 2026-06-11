@@ -128,7 +128,8 @@ impl VirtualKbdMouse {
             | Event::Heartbeat
             | Event::ClipboardText { .. }
             | Event::EnterAt { .. }
-            | Event::EdgeReached { .. } => {
+            | Event::EdgeReached { .. }
+            | Event::ClientInfo { .. } => {
                 return Ok(false);
             }
         };

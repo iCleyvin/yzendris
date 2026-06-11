@@ -7,6 +7,11 @@ pub use crate::hyprland::{cursor_pos, focused_monitor_rect, move_cursor};
 
 pub const BACKEND: &str = "uinput/Hyprland";
 
+/// The client's screen resolution (logical), for reporting to the host.
+pub fn screen_size() -> Option<(i32, i32)> {
+    crate::hyprland::focused_monitor_rect().map(|(_, _, w, h)| (w, h))
+}
+
 pub struct Injector {
     dev: crate::uinput::VirtualKbdMouse,
 }

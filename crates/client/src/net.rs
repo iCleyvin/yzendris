@@ -65,6 +65,11 @@ where
         }
     });
 
+    // Report our screen resolution to the host so its GUI can show it.
+    if let Some((w, h)) = crate::platform::screen_size() {
+        let _ = wtx.send(Event::ClientInfo { width: w, height: h });
+    }
+
     loop {
         let maybe = tokio::time::timeout(timeout, recv_event(&mut reader)).await;
 

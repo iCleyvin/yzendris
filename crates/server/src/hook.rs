@@ -61,13 +61,33 @@ pub fn set_client_connected(client: usize, val: bool) {
     write_status_file();
 }
 
-/// Write the connected-clients bitmask to %APPDATA%\yzendris\status so the GUI
-/// can show live per-client connection state reliably (the log scrolls).
+/// Per-client screen resolution reported by the client: packed (w<<32 | h).
+static CLIENT_RES: [AtomicU64; 64] = [const { AtomicU64::new(0) }; 64];
+
+/// Record a client's reported screen resolution (from `Event::ClientInfo`).
+pub fn set_client_resolution(client: usize, w: i32, h: i32) {
+    if client < 64 {
+        CLIENT_RES[client].store(((w as u64) << 32) | (h as u32 as u64), Ordering::Relaxed);
+        write_status_file();
+    }
+}
+
+/// Write live status to %APPDATA%\yzendris\status so the GUI can show it.
+/// Line 1: connected bitmask. Then `res <id> <w> <h>` per known resolution.
 fn write_status_file() {
     let mask = CLIENT_CONNECTED_MASK.load(Ordering::Relaxed);
+    let mut s = mask.to_string();
+    for (id, slot) in CLIENT_RES.iter().enumerate() {
+        let packed = slot.load(Ordering::Relaxed);
+        if packed != 0 {
+            let w = (packed >> 32) as i32;
+            let h = (packed & 0xffff_ffff) as i32;
+            s.push_str(&format!("\nres {id} {w} {h}"));
+        }
+    }
     if let Some(dir) = std::env::var_os("APPDATA") {
         let path = std::path::PathBuf::from(dir).join("yzendris").join("status");
-        let _ = std::fs::write(path, mask.to_string());
+        let _ = std::fs::write(path, s);
     }
 }
 

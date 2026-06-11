@@ -39,6 +39,9 @@ pub enum Event {
     /// matching side. Same edge encoding as `EnterAt`. `frac` is the position
     /// along the edge so the server can place the cursor at the same height.
     EdgeReached { edge: u8, frac: f32 },
+    /// Client→Server: the client's screen resolution, sent once on connect so
+    /// the host GUI can show it.
+    ClientInfo { width: i32, height: i32 },
 }
 
 /// Edge encoding shared by `EnterAt` / `EdgeReached`.
