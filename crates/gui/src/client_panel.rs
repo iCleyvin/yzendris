@@ -6,12 +6,14 @@ use eframe::egui;
 
 use crate::config_model::{self, ClientConfig};
 use crate::daemon;
+use crate::setup;
 
 pub struct ClientPanel {
     cfg: ClientConfig,
     fingerprint: Option<String>,
     status_msg: String,
     monitor: daemon::DaemonMonitor,
+    setup_status: std::sync::Arc<std::sync::Mutex<Option<String>>>,
 }
 
 impl ClientPanel {
@@ -21,6 +23,7 @@ impl ClientPanel {
             fingerprint: read_fingerprint(),
             status_msg: String::new(),
             monitor: daemon::DaemonMonitor::new(daemon::Target::Client),
+            setup_status: std::sync::Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -92,6 +95,29 @@ impl ClientPanel {
                         );
                     }
                 }
+            }
+
+            // ── Instalación autosuficiente ──────────────────────────────────
+            ui.add_space(10.0);
+            ui.separator();
+            ui.heading("Instalación");
+            ui.label(
+                "Deja esta máquina lista para recibir: copia el programa, abre el firewall \
+                 y lo arranca al iniciar sesión. En Windows pide permiso de administrador una vez.",
+            );
+            if ui.button("⚙ Instalar y habilitar inicio automático").clicked() {
+                let _ = config_model::save_client_config(&self.cfg);
+                let status_arc = self.setup_status.clone();
+                let port = self.cfg.port;
+                *status_arc.lock().unwrap() = Some("Instalando…".into());
+                std::thread::spawn(move || {
+                    let r = setup::enable(daemon::Target::Client, port);
+                    *status_arc.lock().unwrap() =
+                        Some(match r { Ok(m) => m, Err(e) => format!("✘ {e}") });
+                });
+            }
+            if let Some(msg) = self.setup_status.lock().unwrap().clone() {
+                ui.label(msg);
             }
 
             // ── Control ─────────────────────────────────────────────────────
