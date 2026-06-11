@@ -1,7 +1,7 @@
 /target
 /dist
 
-# personal AI context — not public
+# local working notes (not part of the project)
 CLAUDE.md
 /.vscode
 /.idea
