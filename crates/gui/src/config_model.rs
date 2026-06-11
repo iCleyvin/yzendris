@@ -31,6 +31,7 @@ pub fn client_config_path() -> PathBuf { config_dir().join("client.toml") }
 pub fn gui_config_path()    -> PathBuf { config_dir().join("gui.toml") }
 pub fn trusted_peers_path() -> PathBuf { config_dir().join("trusted_peers.txt") }
 pub fn server_log_path()    -> PathBuf { config_dir().join("server.log") }
+pub fn client_log_path()    -> PathBuf { config_dir().join("client.log") }
 
 // ─── GUI state (role) ────────────────────────────────────────────────────────
 

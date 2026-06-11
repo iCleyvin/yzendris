@@ -63,10 +63,11 @@ like a USB one plugged in. Modifiers work. Binds fire.
   works but you might need to set `kb_layout` manually in `client.toml` (or
   rely on your compositor's global keyboard config — global config DOES apply
   to the virtual device, so it usually just works).
-- No packaged installer — binaries plus two install scripts.
+- No packaged installer — binaries plus install scripts.
 - No clipboard sync for binary/image clipboards — text only.
-- The Host role runs on Windows and the Client role on Linux (that's the
-  combination the project exists to fix). The GUI runs on both.
+- The Host role runs on Windows. The Client runs on Linux (uinput/Hyprland) **or
+  Windows (SendInput)** — handy for a dual-boot laptop that sits between the
+  monitors regardless of which OS it's in. The GUI runs on both.
 
 ## Requirements
 

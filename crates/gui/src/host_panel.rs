@@ -41,7 +41,7 @@ impl HostPanel {
             trusted: config_model::load_trusted_peers(),
             new_fingerprint: String::new(),
             status_msg: String::new(),
-            monitor: daemon::DaemonMonitor::new(),
+            monitor: daemon::DaemonMonitor::new(daemon::Target::Server),
         }
     }
 
@@ -71,7 +71,7 @@ impl HostPanel {
             Ok(()) => {
                 if running {
                     // Restart happens on a background thread — UI stays responsive.
-                    daemon::restart_async();
+                    daemon::restart_async(daemon::Target::Server);
                     self.status_msg = "✔ Guardado, reiniciando servidor…".into();
                 } else {
                     self.status_msg = "✔ Configuración guardada".into();
@@ -152,7 +152,7 @@ impl HostPanel {
             // ── TLS pairing ─────────────────────────────────────────────────
             if self.cfg.tls {
                 ui.heading("Huellas TLS confiables");
-                ui.label("Pega aquí la huella que imprime el cliente Linux al iniciar con TLS:");
+                ui.label("Pega aquí la huella que muestra el cliente (panel Cliente) al activar TLS:");
                 ui.horizontal(|ui| {
                     ui.add(
                         egui::TextEdit::singleline(&mut self.new_fingerprint)
@@ -192,13 +192,13 @@ impl HostPanel {
                 }
                 if status.running {
                     if ui.button("⏹ Detener servidor").clicked() {
-                        daemon::stop_async();
+                        daemon::stop_async(daemon::Target::Server);
                         self.status_msg = "Deteniendo servidor…".into();
                     }
                 } else if ui.button("▶ Iniciar servidor").clicked() {
                     self.sync_layout_into_cfg();
                     let _ = config_model::save_server_config(&self.cfg);
-                    daemon::start_async();
+                    daemon::start_async(daemon::Target::Server);
                     self.status_msg = "Iniciando servidor…".into();
                 }
 

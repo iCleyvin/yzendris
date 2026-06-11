@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc::UnboundedSender;
 use yzendris_protocol::{Event, EDGE_BOTTOM, EDGE_LEFT, EDGE_RIGHT, EDGE_TOP};
 
-use crate::hyprland;
+use crate::platform;
 
 /// Pixels of accumulated push past an edge before we hand control back.
 /// Small enough to feel instant, large enough to ignore incidental contact.
@@ -71,7 +71,7 @@ impl CursorTracker {
             .name("yzendris-cursor-sampler".into())
             .spawn(move || loop {
                 if s.active.load(Ordering::Relaxed) {
-                    if let Some((x, y)) = hyprland::cursor_pos() {
+                    if let Some((x, y)) = platform::cursor_pos() {
                         s.x.store(x, Ordering::Relaxed);
                         s.y.store(y, Ordering::Relaxed);
                         s.valid.store(true, Ordering::Relaxed);
@@ -98,10 +98,10 @@ impl CursorTracker {
     /// These one-shot `hyprctl` calls happen at the capture transition, not in
     /// the per-event hot path, so blocking here is acceptable.
     pub fn on_capture_start(&mut self) {
-        if let Some(rect) = hyprland::focused_monitor_rect() {
+        if let Some(rect) = platform::focused_monitor_rect() {
             self.rect = rect;
         }
-        if let Some((cx, cy)) = hyprland::cursor_pos() {
+        if let Some((cx, cy)) = platform::cursor_pos() {
             self.x = cx as f64;
             self.y = cy as f64;
             self.sampler.x.store(cx, Ordering::Relaxed);
@@ -121,7 +121,7 @@ impl CursorTracker {
     /// EnterAt: warp the cursor to the entry edge at `frac` along it.
     pub fn on_enter_at(&mut self, edge: u8, frac: f32) {
         // Re-read geometry in case focus moved between CaptureStart and EnterAt.
-        if let Some(rect) = hyprland::focused_monitor_rect() {
+        if let Some(rect) = platform::focused_monitor_rect() {
             self.rect = rect;
         }
         let (rx, ry, rw, rh) = self.rect;
@@ -133,7 +133,7 @@ impl CursorTracker {
             EDGE_BOTTOM => (rx + (frac * (rw - 1) as f64) as i32, ry + rh - 2),
             _ => return,
         };
-        hyprland::move_cursor(tx, ty);
+        platform::move_cursor(tx, ty);
         self.x = tx as f64;
         self.y = ty as f64;
         self.sampler.x.store(tx, Ordering::Relaxed);

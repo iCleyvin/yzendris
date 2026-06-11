@@ -94,7 +94,8 @@ fn role_select_ui(ui: &mut egui::Ui, selected: &mut Option<Role>) {
         ui.add_space(24.0);
 
         let host_available = cfg!(windows);
-        let client_available = cfg!(target_os = "linux");
+        // The client now injects on both Linux (uinput) and Windows (SendInput).
+        let client_available = cfg!(target_os = "linux") || cfg!(windows);
         let big = egui::vec2(360.0, 64.0);
 
         let host_btn = egui::Button::new(
@@ -116,14 +117,14 @@ fn role_select_ui(ui: &mut egui::Ui, selected: &mut Option<Role>) {
             *selected = Some(Role::Client);
         }
         if !client_available {
-            ui.small("(el cliente inyecta vía /dev/uinput — esta máquina no es Linux)");
+            ui.small("(el cliente inyecta vía uinput en Linux o SendInput en Windows)");
         }
 
         ui.add_space(30.0);
         ui.separator();
         ui.add_space(8.0);
         ui.small("Host = donde están el teclado y mouse físicos (PC Windows).");
-        ui.small("Cliente = la máquina que los recibe por red (laptop Linux con Hyprland).");
+        ui.small("Cliente = la máquina que los recibe por red (laptop, Linux o Windows).");
     });
 }
 
