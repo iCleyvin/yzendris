@@ -16,10 +16,13 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT,
     KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, MOUSEINPUT, MOUSEEVENTF_HWHEEL,
     MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP,
-    MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL,
+    MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL,
     MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, VIRTUAL_KEY,
 };
-use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, SetCursorPos};
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetCursorInfo, GetCursorPos, SetCursorPos, SystemParametersInfoW, CURSORINFO, CURSOR_SHOWING,
+    SPI_SETMOUSE, SPIF_SENDWININICHANGE, SPIF_UPDATEINIFILE,
+};
 
 pub const BACKEND: &str = "SendInput/Win32";
 
@@ -160,15 +163,17 @@ impl Injector {
                 }
             }
             Event::MouseMove { dx, dy } => {
-                // SendInput relative MOVE is subject to the laptop's mouse-speed
-                // slider AND "enhance pointer precision" accel, which re-
-                // accelerates the host's already-accelerated deltas — the cursor
-                // ends up feeling erratic/non-linear. SetCursorPos moves by exact
-                // pixels with no accel, so motion matches the host 1:1 (and makes
-                // the edge tracker's cursor_pos reads exact).
-                if let Some((cx, cy)) = cursor_pos() {
-                    move_cursor(cx + dx, cy + dy);
-                }
+                // MUST use SendInput relative MOVE, not SetCursorPos: games read
+                // mouse-look/camera through Raw Input (WM_INPUT), which only sees
+                // device-level relative motion. SetCursorPos repositions the cursor
+                // without producing any raw input, so the in-game camera wouldn't
+                // move at all (Fortnite, Wuthering Waves, etc. were dead).
+                //
+                // The double-acceleration that made the desktop cursor feel erratic
+                // is handled by disabling pointer acceleration at startup (see
+                // `setup`) — and Raw Input ignores acceleration entirely, so in-game
+                // aim is linear regardless.
+                send(&[mouse_input(*dx, *dy, 0, MOUSEEVENTF_MOVE)]);
             }
             Event::MouseButton { btn, pressed } => {
                 if let Some((down, up, xdata)) = evdev_button(*btn) {
@@ -238,8 +243,33 @@ impl Injector {
     }
 }
 
-/// No post-create setup needed on Windows (no virtual device, no layout dance).
-pub async fn setup(_inj: &mut Injector, _kb_layout: &str) {}
+/// On Windows the only post-create step is killing pointer acceleration so the
+/// host's relative deltas land 1:1 on the desktop (no layout dance, no device).
+pub async fn setup(_inj: &mut Injector, _kb_layout: &str) {
+    disable_pointer_acceleration();
+}
+
+/// Turn off "Enhance pointer precision" (mouse acceleration) for this session so
+/// the host's relative deltas aren't re-accelerated on top of whatever curve the
+/// host already applied — that double curve is what made the cursor feel erratic.
+/// Raw Input (used by games for camera) ignores this setting, so this only
+/// linearises the *desktop* cursor; in-game aim is unaffected either way.
+fn disable_pointer_acceleration() {
+    // SPI_SETMOUSE takes [threshold1, threshold2, acceleration]; all-zero turns
+    // acceleration off completely.
+    let params: [i32; 3] = [0, 0, 0];
+    unsafe {
+        match SystemParametersInfoW(
+            SPI_SETMOUSE,
+            0,
+            Some(params.as_ptr() as *mut core::ffi::c_void),
+            SPIF_UPDATEINIFILE | SPIF_SENDWININICHANGE,
+        ) {
+            Ok(()) => tracing::info!("pointer acceleration disabled (SPI_SETMOUSE)"),
+            Err(e) => tracing::warn!("could not disable pointer acceleration: {e}"),
+        }
+    }
+}
 
 // ─── Cursor / monitor ────────────────────────────────────────────────────────
 
@@ -250,6 +280,27 @@ pub fn cursor_pos() -> Option<(i32, i32)> {
             Some((p.x, p.y))
         } else {
             None
+        }
+    }
+}
+
+/// True when an application has the pointer "captured" for relative-motion use
+/// (an FPS/character camera). Such games hide the OS cursor during gameplay and
+/// only show it again in menus/pause, so cursor visibility is the cross-game
+/// signal: hidden ⇒ the user is steering a game, not trying to leave the screen.
+/// The tracker uses this to refuse edge hand-off back to the host while a game
+/// holds the mouse.
+pub fn pointer_locked() -> bool {
+    unsafe {
+        let mut ci = CURSORINFO {
+            cbSize: std::mem::size_of::<CURSORINFO>() as u32,
+            ..Default::default()
+        };
+        if GetCursorInfo(&mut ci).is_ok() {
+            // CURSOR_SHOWING bit clear ⇒ cursor hidden ⇒ game consuming the mouse.
+            ci.flags.0 & CURSOR_SHOWING.0 == 0
+        } else {
+            false
         }
     }
 }

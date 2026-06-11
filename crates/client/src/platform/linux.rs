@@ -7,6 +7,15 @@ pub use crate::hyprland::{cursor_pos, focused_monitor_rect, move_cursor};
 
 pub const BACKEND: &str = "uinput/Hyprland";
 
+/// Whether a game currently holds the pointer for relative-motion (camera) use.
+/// Games on the Linux client grab the mouse via Wayland pointer constraints,
+/// which aren't exposed by `hyprctl`, so we can't yet detect this from outside
+/// the compositor — always report `false` (edge hand-off behaves as before).
+/// Revisit if Linux gaming needs the same lock-to-client behaviour as Windows.
+pub fn pointer_locked() -> bool {
+    false
+}
+
 /// The client's screen resolution (logical), for reporting to the host.
 pub fn screen_size() -> Option<(i32, i32)> {
     crate::hyprland::focused_monitor_rect().map(|(_, _, w, h)| (w, h))
