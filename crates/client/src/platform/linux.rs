@@ -45,4 +45,7 @@ pub async fn setup(_inj: &mut Injector, kb_layout: &str) {
     if let Err(e) = crate::hyprland::apply_layout(crate::uinput::DEVICE_NAME, &layout) {
         tracing::warn!("apply_layout: {e}");
     }
+    // Flat accel so libinput doesn't re-accelerate the host's already-
+    // accelerated deltas (otherwise the cursor feels erratic/non-linear).
+    crate::hyprland::apply_pointer_settings(crate::uinput::DEVICE_NAME);
 }

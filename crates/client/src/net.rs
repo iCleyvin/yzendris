@@ -24,6 +24,12 @@ pub async fn run_once(
     let (tcp_stream, peer) = listener.accept().await.context("accept")?;
     info!("server connected from {peer}");
 
+    // Disable Nagle so incoming mouse-move frames aren't delayed (and so our
+    // outbound EdgeReached/heartbeat go out immediately too).
+    if let Err(e) = tcp_stream.set_nodelay(true) {
+        warn!("set_nodelay failed: {e}");
+    }
+
     if let Some(acceptor) = tls_acceptor {
         let tls_stream = acceptor.accept(tcp_stream).await.context("TLS handshake")?;
         let (reader, writer) = tokio::io::split(tls_stream);
