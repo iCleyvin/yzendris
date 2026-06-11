@@ -241,6 +241,10 @@ pub enum Layout {
     /// other, laptop in the middle). Crossing the horizontal boundary line
     /// routes through the laptop's top/bottom edge.
     Stacked { top: Rect, bottom: Rect, boundary_y: i32 },
+    /// The client sits past ONE specific monitor's free edge. `side`: 0=right
+    /// 1=left 2=bottom 3=top. Only triggers within that monitor's span, so the
+    /// client can be placed above/below/beside a chosen monitor.
+    MonitorSide { rect: Rect, side: u8 },
 }
 
 static PORTALS: OnceLock<Vec<Portal>> = OnceLock::new();
@@ -584,6 +588,25 @@ fn crossing_for(
                 None
             }
         }
+        Layout::MonitorSide { rect, side } => {
+            // Cursor at this monitor's edge, within the monitor's span.
+            let at = match side {
+                0 => x >= rect.right - 1 && y >= rect.top && y < rect.bottom,
+                1 => x <= rect.left && y >= rect.top && y < rect.bottom,
+                2 => y >= rect.bottom - 1 && x >= rect.left && x < rect.right,
+                3 => y <= rect.top && x >= rect.left && x < rect.right,
+                _ => false,
+            };
+            if !at {
+                return None;
+            }
+            Some(match side {
+                0 => (EDGE_LEFT, frac_of(y, rect.top, rect.bottom), 0),
+                1 => (EDGE_RIGHT, frac_of(y, rect.top, rect.bottom), 0),
+                2 => (EDGE_TOP, frac_of(x, rect.left, rect.right), 0),
+                _ => (EDGE_BOTTOM, frac_of(x, rect.left, rect.right), 0),
+            })
+        }
     }
 }
 
@@ -697,6 +720,17 @@ pub fn release_capture_toward(client: usize, edge: u8, frac: f32) {
                                       screen.bottom - 1 - RETURN_MARGIN)),
             (3, EDGE_BOTTOM) => Some((lerp_clamped(screen.left, screen.right, frac),
                                       screen.top + RETURN_MARGIN)),
+            _ => None,
+        },
+        Layout::MonitorSide { rect, side } => match (side, edge) {
+            (0, EDGE_LEFT)   => Some((rect.right - 1 - RETURN_MARGIN,
+                                      lerp_clamped(rect.top, rect.bottom, frac))),
+            (1, EDGE_RIGHT)  => Some((rect.left + RETURN_MARGIN,
+                                      lerp_clamped(rect.top, rect.bottom, frac))),
+            (2, EDGE_TOP)    => Some((lerp_clamped(rect.left, rect.right, frac),
+                                      rect.bottom - 1 - RETURN_MARGIN)),
+            (3, EDGE_BOTTOM) => Some((lerp_clamped(rect.left, rect.right, frac),
+                                      rect.top + RETURN_MARGIN)),
             _ => None,
         },
     };

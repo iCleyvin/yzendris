@@ -90,12 +90,16 @@ pub struct ClientEntry {
     pub port: u16,
     #[serde(default)]
     pub tls: bool,
-    /// Placement: the two monitor names the client sits between.
+    /// Placement: the two monitor names the client sits between (the gap).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub between: Option<Vec<String>>,
-    /// Placement: an outer edge ("right"/"left"/"top"/"bottom").
+    /// Placement: a free edge ("right"/"left"/"top"/"bottom"). When `monitor`
+    /// is set it's that monitor's edge; otherwise the whole desktop's edge.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub edge: Option<String>,
+    /// The specific monitor whose edge the client sits at (with `edge`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub monitor: Option<String>,
 }
 
 fn default_client_port() -> u16 { 7547 }
@@ -109,6 +113,7 @@ impl Default for ClientEntry {
             tls: false,
             between: None,
             edge: Some("right".into()),
+            monitor: None,
         }
     }
 }
@@ -177,6 +182,7 @@ pub fn load_server_config() -> ServerConfig {
                 tls: p.tls.unwrap_or(false),
                 between,
                 edge,
+                monitor: None,
             }]
         }
     };

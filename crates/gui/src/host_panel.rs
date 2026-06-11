@@ -12,10 +12,11 @@ use crate::setup;
 /// Where a client sits relative to the host monitors.
 #[derive(Clone, PartialEq)]
 enum Placement {
-    /// Between two monitors (device names); orientation inferred from geometry.
-    Between(String, String),
-    /// Outer edge of the whole desktop.
-    Edge(String),
+    /// In the gap between two adjacent monitors (device names); orientation
+    /// (side by side / stacked) is inferred from geometry.
+    Gap(String, String),
+    /// At a specific monitor's free edge: (monitor device, edge string).
+    Side(String, String),
 }
 
 pub struct HostPanel {
@@ -99,8 +100,16 @@ impl HostPanel {
                     self.monitors = monitors::enumerate();
                 }
             });
-            ui.label("Gris = pantallas · verde = clientes. Arrastra un cliente a un borde o al hueco entre dos pantallas para mover por dónde se entra a él.");
-            arrangement_editor(ui, &self.monitors, &mut self.cfg.clients);
+            ui.label("Arrastra una PANTALLA para reubicarla en Windows, o un CLIENTE (verde) a un lado de una pantalla o al hueco entre dos.");
+            if let Some(changes) = arrangement_editor(ui, &self.monitors, &mut self.cfg.clients) {
+                match monitors::reposition(&changes) {
+                    Ok(()) => {
+                        self.monitors = monitors::enumerate();
+                        self.status_msg = "✔ Pantallas reubicadas en Windows".into();
+                    }
+                    Err(e) => self.status_msg = format!("✘ No pude reubicar: {e}"),
+                }
+            }
             ui.add_space(8.0);
 
             // ── Clientes ────────────────────────────────────────────────────
@@ -148,7 +157,7 @@ impl HostPanel {
                         ui.end_row();
 
                         ui.label("Posición:");
-                        let current = client_placement(c);
+                        let current = client_placement(c, &self.monitors);
                         let current_label = placement_label(&self.monitors, &current);
                         egui::ComboBox::from_id_salt(("placement", i))
                             .selected_text(current_label)
@@ -281,21 +290,37 @@ impl HostPanel {
 
 // ─── Placement helpers ───────────────────────────────────────────────────────
 
-fn client_placement(c: &ClientEntry) -> Placement {
+fn client_placement(c: &ClientEntry, monitors: &[MonitorInfo]) -> Placement {
     if let Some(b) = c.between.as_ref().filter(|b| b.len() == 2) {
-        Placement::Between(b[0].clone(), b[1].clone())
+        Placement::Gap(b[0].clone(), b[1].clone())
+    } else if let Some(m) = c.monitor.clone() {
+        Placement::Side(m, c.edge.clone().unwrap_or_else(|| "right".into()))
     } else {
-        Placement::Edge(c.edge.clone().unwrap_or_else(|| "right".into()))
+        // Legacy whole-desktop edge → the monitor on that side of the desktop.
+        let e = c.edge.clone().unwrap_or_else(|| "right".into());
+        Placement::Side(default_monitor_for_edge(monitors, &e), e)
     }
+}
+
+fn default_monitor_for_edge(monitors: &[MonitorInfo], edge: &str) -> String {
+    let pick = match edge {
+        "left" => monitors.iter().min_by_key(|m| m.left),
+        "right" => monitors.iter().max_by_key(|m| m.right),
+        "top" => monitors.iter().min_by_key(|m| m.top),
+        _ => monitors.iter().max_by_key(|m| m.bottom),
+    };
+    pick.map(|m| m.device.clone()).unwrap_or_default()
 }
 
 fn set_placement(c: &mut ClientEntry, p: &Placement) {
     match p {
-        Placement::Between(a, b) => {
+        Placement::Gap(a, b) => {
             c.between = Some(vec![a.clone(), b.clone()]);
             c.edge = None;
+            c.monitor = None;
         }
-        Placement::Edge(e) => {
+        Placement::Side(m, e) => {
+            c.monitor = Some(m.clone());
             c.edge = Some(e.clone());
             c.between = None;
         }
@@ -316,18 +341,22 @@ fn monitor_number(monitors: &[MonitorInfo], device: &str) -> String {
 
 fn placement_label(monitors: &[MonitorInfo], p: &Placement) -> String {
     match p {
-        Placement::Between(a, b) => {
+        Placement::Gap(a, b) => {
             let na = monitor_number(monitors, a);
             let nb = monitor_number(monitors, b);
             let kind = pair_kind(monitors, a, b);
             format!("Entre pantalla {na} y {nb}{kind}")
         }
-        Placement::Edge(e) => match e.as_str() {
-            "left" => "Borde izquierdo de todo".into(),
-            "top" => "Arriba de todo".into(),
-            "bottom" => "Abajo de todo".into(),
-            _ => "Borde derecho de todo".into(),
-        },
+        Placement::Side(m, e) => {
+            let n = monitor_number(monitors, m);
+            let side = match e.as_str() {
+                "left" => "A la izquierda de",
+                "top" => "Arriba de",
+                "bottom" => "Abajo de",
+                _ => "A la derecha de",
+            };
+            format!("{side} la pantalla {n}")
+        }
     }
 }
 
@@ -347,17 +376,22 @@ fn pair_kind(monitors: &[MonitorInfo], a: &str, b: &str) -> String {
     }
 }
 
-/// All placement options: every adjacent monitor pair + the four outer edges.
+/// All placement options: every adjacent-monitor gap + every monitor's free edges.
 fn placement_options(monitors: &[MonitorInfo]) -> Vec<Placement> {
     let mut out = Vec::new();
     for (i, j, _) in adjacent_pairs(monitors) {
-        out.push(Placement::Between(
+        out.push(Placement::Gap(
             monitors[i].device.clone(),
             monitors[j].device.clone(),
         ));
     }
-    for e in ["right", "left", "top", "bottom"] {
-        out.push(Placement::Edge(e.into()));
+    for idx in 0..monitors.len() {
+        let free = monitors::free_sides(monitors, idx);
+        for (e, k) in [("right", 0usize), ("left", 1), ("bottom", 2), ("top", 3)] {
+            if free[k] {
+                out.push(Placement::Side(monitors[idx].device.clone(), e.into()));
+            }
+        }
     }
     out
 }
@@ -392,12 +426,12 @@ fn adjacent_pairs(monitors: &[MonitorInfo]) -> Vec<(usize, usize, &'static str)>
 
 // ─── Arrangement diagram ─────────────────────────────────────────────────────
 
-/// Are two placements the same spot? (Between is order-insensitive.)
+/// Are two placements the same spot? (Gap is order-insensitive.)
 fn placement_eq(a: &Placement, b: &Placement) -> bool {
     let norm = |s: &str| s.trim().trim_start_matches(r"\\.\").to_uppercase();
     match (a, b) {
-        (Placement::Edge(x), Placement::Edge(y)) => x == y,
-        (Placement::Between(a1, a2), Placement::Between(b1, b2)) => {
+        (Placement::Side(m1, e1), Placement::Side(m2, e2)) => norm(m1) == norm(m2) && e1 == e2,
+        (Placement::Gap(a1, a2), Placement::Gap(b1, b2)) => {
             let (na1, na2, nb1, nb2) = (norm(a1), norm(a2), norm(b1), norm(b2));
             (na1 == nb1 && na2 == nb2) || (na1 == nb2 && na2 == nb1)
         }
@@ -405,27 +439,30 @@ fn placement_eq(a: &Placement, b: &Placement) -> bool {
     }
 }
 
-/// Interactive arrangement: drag each client (green) to a drop slot — an outer
-/// edge or the gap between two adjacent monitors — to set how the cursor
-/// crosses into it. Monitors stay where Windows reports them.
-fn arrangement_editor(ui: &mut egui::Ui, monitors: &[MonitorInfo], clients: &mut [ClientEntry]) {
+/// Interactive arrangement. Drag a MONITOR to relocate it in Windows (returns
+/// the new positions to apply). Drag a CLIENT (green badge) to a monitor's free
+/// edge or the gap between two monitors to set how the cursor crosses into it.
+/// Monitors are shown at their real Windows positions so the picture matches
+/// reality.
+fn arrangement_editor(
+    ui: &mut egui::Ui,
+    monitors: &[MonitorInfo],
+    clients: &mut [ClientEntry],
+) -> Option<Vec<(String, i32, i32)>> {
     if monitors.is_empty() {
         ui.label("(no se detectaron pantallas — disponible solo en Windows)");
-        return;
+        return None;
     }
 
     let avg_w = monitors.iter().map(|m| m.width()).sum::<i32>() as f32 / monitors.len() as f32;
     let avg_h = monitors.iter().map(|m| m.height()).sum::<i32>() as f32 / monitors.len() as f32;
-    let slot_w = (avg_w * 0.7).max(350.0);
-    let slot_h = (avg_h * 0.7).max(260.0);
-    let pad = (avg_w * 0.06).max(40.0);
-    let box_w = slot_w;
-    let box_h = slot_h;
+    let badge_w = (avg_w * 0.5).max(260.0);
+    let badge_h = (avg_h * 0.28).max(120.0);
+    let off_x = badge_w * 0.5 + avg_w * 0.05;
+    let off_y = badge_h * 0.5 + avg_h * 0.08;
 
-    // Monitor rects (mutable). We "explode" the arrangement: insert a real gap
-    // at every adjacent boundary so each client sits cleanly in a gap instead
-    // of overlapping the monitors.
-    let mut mon: Vec<egui::Rect> = monitors
+    // Monitor rects at REAL positions.
+    let mon: Vec<egui::Rect> = monitors
         .iter()
         .map(|m| {
             egui::Rect::from_min_size(
@@ -437,76 +474,51 @@ fn arrangement_editor(ui: &mut egui::Ui, monitors: &[MonitorInfo], clients: &mut
 
     // Drop slots: (placement, virtual center).
     let mut cands: Vec<(Placement, egui::Pos2)> = Vec::new();
-    let pairs = adjacent_pairs(monitors);
-
-    // Side-by-side gaps (vertical boundaries), left to right.
-    let mut sbs: Vec<(usize, usize)> = pairs
-        .iter()
-        .filter(|(i, j, _)| !pair_is_stacked(&monitors[*i], &monitors[*j]))
-        .map(|(i, j, _)| (*i, *j))
-        .collect();
-    sbs.sort_by_key(|(i, j)| monitors[*i].left.min(monitors[*j].left));
-    let gap_w = slot_w + 2.0 * pad;
-    for (i, j) in sbs {
-        let (l, r) = if monitors[i].left <= monitors[j].left { (i, j) } else { (j, i) };
-        let boundary_x = mon[l].max.x;
-        let band_cy = (mon[l].min.y.max(mon[r].min.y) + mon[l].max.y.min(mon[r].max.y)) / 2.0;
-        for m in mon.iter_mut() {
-            if m.min.x >= boundary_x - 1.0 {
-                *m = m.translate(egui::vec2(gap_w, 0.0));
-            }
-        }
-        for (_, p) in cands.iter_mut() {
-            if p.x >= boundary_x - 1.0 {
-                p.x += gap_w;
-            }
-        }
+    for (i, j, _) in adjacent_pairs(monitors) {
+        let (a, b) = (&monitors[i], &monitors[j]);
+        let pos = if pair_is_stacked(a, b) {
+            let (t, bo) = if a.top <= b.top { (a, b) } else { (b, a) };
+            egui::pos2(
+                (t.left.max(bo.left) + t.right.min(bo.right)) as f32 / 2.0,
+                t.bottom as f32,
+            )
+        } else {
+            let (l, r) = if a.left <= b.left { (a, b) } else { (b, a) };
+            egui::pos2(
+                l.right as f32,
+                (l.top.max(r.top) + l.bottom.min(r.bottom)) as f32 / 2.0,
+            )
+        };
         cands.push((
-            Placement::Between(monitors[i].device.clone(), monitors[j].device.clone()),
-            egui::pos2(boundary_x + gap_w / 2.0, band_cy),
+            Placement::Gap(monitors[i].device.clone(), monitors[j].device.clone()),
+            pos,
         ));
     }
-
-    // Stacked gaps (horizontal boundaries), top to bottom.
-    let mut stk: Vec<(usize, usize)> = pairs
-        .iter()
-        .filter(|(i, j, _)| pair_is_stacked(&monitors[*i], &monitors[*j]))
-        .map(|(i, j, _)| (*i, *j))
-        .collect();
-    stk.sort_by_key(|(i, j)| monitors[*i].top.min(monitors[*j].top));
-    let gap_h = slot_h + 2.0 * pad;
-    for (i, j) in stk {
-        let (t, bo) = if monitors[i].top <= monitors[j].top { (i, j) } else { (j, i) };
-        let boundary_y = mon[t].max.y;
-        let band_cx = (mon[t].min.x.max(mon[bo].min.x) + mon[t].max.x.min(mon[bo].max.x)) / 2.0;
-        for m in mon.iter_mut() {
-            if m.min.y >= boundary_y - 1.0 {
-                *m = m.translate(egui::vec2(0.0, gap_h));
+    for idx in 0..monitors.len() {
+        let m = &monitors[idx];
+        let cx = (m.left + m.right) as f32 / 2.0;
+        let cy = (m.top + m.bottom) as f32 / 2.0;
+        let free = monitors::free_sides(monitors, idx);
+        for (e, k, pos) in [
+            ("right", 0usize, egui::pos2(m.right as f32 + off_x, cy)),
+            ("left", 1, egui::pos2(m.left as f32 - off_x, cy)),
+            ("bottom", 2, egui::pos2(cx, m.bottom as f32 + off_y)),
+            ("top", 3, egui::pos2(cx, m.top as f32 - off_y)),
+        ] {
+            if free[k] {
+                cands.push((Placement::Side(m.device.clone(), e.into()), pos));
             }
         }
-        for (_, p) in cands.iter_mut() {
-            if p.y >= boundary_y - 1.0 {
-                p.y += gap_h;
-            }
-        }
-        cands.push((
-            Placement::Between(monitors[i].device.clone(), monitors[j].device.clone()),
-            egui::pos2(band_cx, boundary_y + gap_h / 2.0),
-        ));
     }
 
-    // Edge slots, outside the exploded bounding box.
-    let bbox = mon.iter().copied().reduce(|a, b| a.union(b)).unwrap();
-    let c = bbox.center();
-    let em = slot_w.max(slot_h) * 0.6 + pad;
-    cands.push((Placement::Edge("left".into()), egui::pos2(bbox.min.x - em, c.y)));
-    cands.push((Placement::Edge("right".into()), egui::pos2(bbox.max.x + em, c.y)));
-    cands.push((Placement::Edge("top".into()), egui::pos2(c.x, bbox.min.y - em)));
-    cands.push((Placement::Edge("bottom".into()), egui::pos2(c.x, bbox.max.y + em)));
+    // Virtual area: monitors + all slot badges.
+    let mut total = mon.iter().copied().reduce(|a, b| a.union(b)).unwrap();
+    for (_, p) in &cands {
+        total = total.union(egui::Rect::from_center_size(*p, egui::vec2(badge_w, badge_h)));
+    }
+    total = total.expand(avg_w * 0.03);
 
-    // Virtual area to fit, with room for the edge slot boxes.
-    let total = bbox.expand2(egui::vec2(em + slot_w * 0.6, em + slot_h * 0.6));
-    let canvas_size = egui::vec2(ui.available_width().min(580.0), 240.0);
+    let canvas_size = egui::vec2(ui.available_width().min(580.0), 250.0);
     let (resp, painter) = ui.allocate_painter(canvas_size, egui::Sense::hover());
     let canvas = resp.rect.shrink(8.0);
     let scale = (canvas.width() / total.width())
@@ -518,25 +530,94 @@ fn arrangement_editor(ui: &mut egui::Ui, monitors: &[MonitorInfo], clients: &mut
         egui::Rect::from_min_max(offset + r.min.to_vec2() * scale, offset + r.max.to_vec2() * scale)
     };
     let to_virtual = |sp: egui::Pos2| ((sp - offset) / scale).to_pos2();
-
     let nearest = |pv: egui::Pos2| -> usize {
-        let mut best = 0;
-        let mut bd = f32::MAX;
-        for (k, (_, pos)) in cands.iter().enumerate() {
-            let d = pos.distance_sq(pv);
-            if d < bd {
-                bd = d;
-                best = k;
-            }
-        }
-        best
+        cands
+            .iter()
+            .enumerate()
+            .min_by(|(_, x), (_, y)| {
+                x.1.distance_sq(pv).partial_cmp(&y.1.distance_sq(pv)).unwrap()
+            })
+            .map(|(k, _)| k)
+            .unwrap_or(0)
     };
 
-    // Monitors (gray).
+    let badge_screen = egui::vec2(badge_w * scale, badge_h * scale);
+
+    // ── Clients first (they sit on top) ──────────────────────────────────────
+    let mut client_busy = false;
+    let mut client_draws: Vec<(egui::Pos2, String, bool)> = Vec::new();
+    for (ci, client) in clients.iter_mut().enumerate() {
+        let cur = client_placement(client, monitors);
+        let slot = cands
+            .iter()
+            .find(|(p, _)| placement_eq(p, &cur))
+            .map(|(_, p)| *p)
+            .unwrap_or(cands.first().map(|(_, p)| *p).unwrap_or(egui::Pos2::ZERO));
+        let center = to_screen(slot);
+        let rect = egui::Rect::from_center_size(center, badge_screen);
+        let id = ui.id().with(("yz_client", ci));
+        let r = ui.interact(rect, id, egui::Sense::drag());
+        let mut draw_center = center;
+        if r.dragged() {
+            client_busy = true;
+            if let Some(pp) = r.interact_pointer_pos() {
+                draw_center = pp;
+                let n = nearest(to_virtual(pp));
+                painter.circle_stroke(
+                    to_screen(cands[n].1),
+                    10.0,
+                    egui::Stroke::new(2.0, egui::Color32::from_rgb(150, 250, 190)),
+                );
+            }
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+        } else if r.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+        }
+        if r.drag_stopped() {
+            if let Some(pp) = r.interact_pointer_pos() {
+                set_placement(client, &cands[nearest(to_virtual(pp))].0);
+            }
+        }
+        client_draws.push((draw_center, client.name.clone(), r.dragged()));
+    }
+
+    // ── Monitors (draggable to relocate in Windows) ──────────────────────────
+    let mut reposition: Option<Vec<(String, i32, i32)>> = None;
+    let mut dragged_mon: Option<(usize, egui::Pos2)> = None;
+    if !client_busy {
+        for mi in 0..mon.len() {
+            let sr = to_screen_rect(mon[mi]);
+            let id = ui.id().with(("yz_mon", mi));
+            let r = ui.interact(sr, id, egui::Sense::drag());
+            if r.dragged() {
+                if let Some(pp) = r.interact_pointer_pos() {
+                    dragged_mon = Some((mi, pp));
+                }
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+            } else if r.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Move);
+            }
+            if r.drag_stopped() {
+                if let Some(pp) = r.interact_pointer_pos() {
+                    reposition = Some(monitor_drop_positions(monitors, mi, to_virtual(pp)));
+                }
+            }
+        }
+    }
+
+    // ── Paint ────────────────────────────────────────────────────────────────
+    // Slot markers (faint).
+    for (_, pos) in &cands {
+        painter.circle_filled(to_screen(*pos), 3.0, egui::Color32::from_gray(90));
+    }
+    // Monitors (gray). The dragged one follows the cursor.
     for (i, r) in mon.iter().enumerate() {
-        let sr = to_screen_rect(*r);
+        let sr = match dragged_mon {
+            Some((mi, pp)) if mi == i => egui::Rect::from_center_size(pp, sr_size(*r, scale)),
+            _ => to_screen_rect(*r),
+        };
         painter.rect_filled(sr, 4.0, egui::Color32::from_gray(45));
-        painter.rect_stroke(sr, 4.0, egui::Stroke::new(1.5, egui::Color32::from_gray(140)), egui::StrokeKind::Inside);
+        painter.rect_stroke(sr, 4.0, egui::Stroke::new(1.5, egui::Color32::from_gray(150)), egui::StrokeKind::Inside);
         painter.text(
             sr.center(),
             egui::Align2::CENTER_CENTER,
@@ -545,60 +626,82 @@ fn arrangement_editor(ui: &mut egui::Ui, monitors: &[MonitorInfo], clients: &mut
             egui::Color32::WHITE,
         );
     }
-    // Candidate slot markers (faint).
-    for (_, pos) in &cands {
-        painter.circle_filled(to_screen(*pos), 3.0, egui::Color32::from_gray(90));
-    }
-
-    let box_screen = egui::vec2(box_w * scale, box_h * scale);
-
-    // Each client: a draggable box snapping to the nearest slot on release.
-    for (ci, client) in clients.iter_mut().enumerate() {
-        let cur = client_placement(client);
-        let slot_pos = cands
-            .iter()
-            .find(|(p, _)| placement_eq(p, &cur))
-            .map(|(_, p)| *p)
-            .unwrap_or(cands[0].1);
-        let center = to_screen(slot_pos);
-        let rect = egui::Rect::from_center_size(center, box_screen);
-        let id = ui.id().with(("yz_client_box", ci));
-        let r = ui.interact(rect, id, egui::Sense::drag());
-
-        let mut draw_center = center;
-        if r.dragged() {
-            if let Some(pp) = r.interact_pointer_pos() {
-                draw_center = pp;
-                let n = nearest(to_virtual(pp));
-                painter.circle_stroke(to_screen(cands[n].1), 10.0, egui::Stroke::new(2.0, egui::Color32::from_rgb(110, 230, 150)));
-            }
-        }
-        if r.drag_stopped() {
-            if let Some(pp) = r.interact_pointer_pos() {
-                let n = nearest(to_virtual(pp));
-                set_placement(client, &cands[n].0);
-            }
-        }
-
-        let br = egui::Rect::from_center_size(draw_center, box_screen);
-        let (fill, stroke) = if r.dragged() {
+    // Client badges.
+    for (center, name, dragging) in &client_draws {
+        let br = egui::Rect::from_center_size(*center, badge_screen);
+        let (fill, stroke) = if *dragging {
             (egui::Color32::from_rgb(45, 140, 85), egui::Color32::from_rgb(150, 250, 190))
         } else {
             (egui::Color32::from_rgb(35, 110, 65), egui::Color32::from_rgb(110, 230, 150))
         };
-        painter.rect_filled(br, 4.0, fill);
-        painter.rect_stroke(br, 4.0, egui::Stroke::new(1.5, stroke), egui::StrokeKind::Inside);
+        painter.rect_filled(br, 6.0, fill);
+        painter.rect_stroke(br, 6.0, egui::Stroke::new(1.5, stroke), egui::StrokeKind::Inside);
         painter.text(
             br.center(),
             egui::Align2::CENTER_CENTER,
-            &client.name,
+            name,
             egui::FontId::proportional(12.0),
             egui::Color32::WHITE,
         );
-        if r.hovered() || r.dragged() {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
-        }
     }
+
+    reposition
+}
+
+fn sr_size(r: egui::Rect, scale: f32) -> egui::Vec2 {
+    egui::vec2(r.width() * scale, r.height() * scale)
+}
+
+/// New positions for all monitors after dropping monitor `m_idx` near another
+/// monitor: snaps M to a side of the nearest other monitor, then normalizes so
+/// the primary is at (0,0) (Windows requires this).
+fn monitor_drop_positions(
+    monitors: &[MonitorInfo],
+    m_idx: usize,
+    drop: egui::Pos2,
+) -> Vec<(String, i32, i32)> {
+    let mut pos: Vec<(i32, i32)> = monitors.iter().map(|m| (m.left, m.top)).collect();
+
+    let n_idx = (0..monitors.len())
+        .filter(|&k| k != m_idx)
+        .min_by_key(|&k| {
+            let cx = (monitors[k].left + monitors[k].right) / 2;
+            let cy = (monitors[k].top + monitors[k].bottom) / 2;
+            let dx = drop.x as i32 - cx;
+            let dy = drop.y as i32 - cy;
+            (dx * dx + dy * dy) as i64
+        });
+    let Some(n) = n_idx else {
+        return Vec::new();
+    };
+
+    let m = &monitors[m_idx];
+    let nn = &monitors[n];
+    let ncx = (nn.left + nn.right) / 2;
+    let ncy = (nn.top + nn.bottom) / 2;
+    let dx = drop.x as i32 - ncx;
+    let dy = drop.y as i32 - ncy;
+    pos[m_idx] = if dx.abs() >= dy.abs() {
+        if dx >= 0 { (nn.right, nn.top) } else { (nn.left - m.width(), nn.top) }
+    } else if dy >= 0 {
+        (nn.left, nn.bottom)
+    } else {
+        (nn.left, nn.top - m.height())
+    };
+
+    // Normalize so the primary monitor ends at (0,0).
+    let prim = monitors.iter().position(|m| m.primary).unwrap_or(0);
+    let (ox, oy) = pos[prim];
+    for p in pos.iter_mut() {
+        p.0 -= ox;
+        p.1 -= oy;
+    }
+
+    monitors
+        .iter()
+        .enumerate()
+        .map(|(i, m)| (m.device.clone(), pos[i].0, pos[i].1))
+        .collect()
 }
 
 

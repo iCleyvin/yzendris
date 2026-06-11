@@ -100,10 +100,13 @@ struct ClientCfg {
     /// (side by side / stacked) is inferred from their geometry.
     #[serde(default)]
     between: Option<Vec<String>>,
-    /// Placement: an outer edge of the desktop ("right"/"left"/"top"/"bottom").
-    /// Used when `between` is absent.
+    /// Placement: an edge ("right"/"left"/"top"/"bottom"). With `monitor` it's
+    /// that monitor's free edge; without, the whole desktop's edge.
     #[serde(default)]
     edge: Option<String>,
+    /// The specific monitor whose edge the client sits at (with `edge`).
+    #[serde(default)]
+    monitor: Option<String>,
 }
 
 #[cfg(windows)]
@@ -320,6 +323,9 @@ fn resolve_clients(config: &Config) -> Vec<ResolvedClient> {
                 let layout = if let Some(pair) = c.between.as_ref().filter(|p| p.len() == 2) {
                     layout_between(&pair[0], &pair[1], &mons)
                         .unwrap_or_else(|| layout_edge(c.edge.as_deref().unwrap_or("right")))
+                } else if let Some(mon) = c.monitor.as_deref() {
+                    layout_monitor_side(mon, c.edge.as_deref().unwrap_or("right"), &mons)
+                        .unwrap_or_else(|| layout_edge(c.edge.as_deref().unwrap_or("right")))
                 } else {
                     layout_edge(c.edge.as_deref().unwrap_or("right"))
                 };
@@ -376,6 +382,17 @@ fn layout_edge(edge: &str) -> hook::Layout {
         edge::Edge::Right
     });
     hook::Layout::Edge { side: edge_kind.side(), screen: edge::virtual_screen() }
+}
+
+/// Build a "client at a specific monitor's free edge" layout.
+#[cfg(windows)]
+fn layout_monitor_side(mon_name: &str, edge: &str, mons: &[monitors::Monitor]) -> Option<hook::Layout> {
+    let m = monitors::find(mons, mon_name)?;
+    let side = edge::Edge::from_str(edge)?.side();
+    Some(hook::Layout::MonitorSide {
+        rect: hook::Rect { left: m.left, top: m.top, right: m.right, bottom: m.bottom },
+        side,
+    })
 }
 
 /// Build a between-monitors layout from two monitor names. Orientation
