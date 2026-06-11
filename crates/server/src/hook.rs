@@ -58,6 +58,17 @@ pub fn set_client_connected(client: usize, val: bool) {
     } else {
         CLIENT_CONNECTED_MASK.fetch_and(!bit, Ordering::Relaxed);
     }
+    write_status_file();
+}
+
+/// Write the connected-clients bitmask to %APPDATA%\yzendris\status so the GUI
+/// can show live per-client connection state reliably (the log scrolls).
+fn write_status_file() {
+    let mask = CLIENT_CONNECTED_MASK.load(Ordering::Relaxed);
+    if let Some(dir) = std::env::var_os("APPDATA") {
+        let path = std::path::PathBuf::from(dir).join("yzendris").join("status");
+        let _ = std::fs::write(path, mask.to_string());
+    }
 }
 
 fn client_connected(client: usize) -> bool {
