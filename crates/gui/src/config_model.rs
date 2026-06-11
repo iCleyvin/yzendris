@@ -71,16 +71,45 @@ pub fn save_role(role: Role) -> anyhow::Result<()> {
 
 // ─── Server (host) config ────────────────────────────────────────────────────
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+/// Host config: global settings + one or more clients.
+#[derive(Serialize, Debug, Clone, PartialEq)]
 pub struct ServerConfig {
-    pub client_addr: String,
-    pub port: u16,
-    pub edge: String,
     pub heartbeat_ms: u64,
     pub clipboard: bool,
+    pub clients: Vec<ClientEntry>,
+}
+
+/// One client and where it sits in the host's screen arrangement.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct ClientEntry {
+    #[serde(default)]
+    pub name: String,
+    pub addr: String,
+    #[serde(default = "default_client_port")]
+    pub port: u16,
+    #[serde(default)]
     pub tls: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub layout: Option<LayoutConfig>,
+    /// Placement: the two monitor names the client sits between.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub between: Option<Vec<String>>,
+    /// Placement: an outer edge ("right"/"left"/"top"/"bottom").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edge: Option<String>,
+}
+
+fn default_client_port() -> u16 { 7547 }
+
+impl Default for ClientEntry {
+    fn default() -> Self {
+        Self {
+            name: "cliente".into(),
+            addr: "192.168.1.42".into(),
+            port: 7547,
+            tls: false,
+            between: None,
+            edge: Some("right".into()),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
@@ -96,25 +125,23 @@ pub struct LayoutConfig {
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
-            client_addr: "192.168.1.42".into(),
-            port: 7547,
-            edge: "right".into(),
             heartbeat_ms: 1000,
             clipboard: true,
-            tls: false,
-            layout: None,
+            clients: vec![ClientEntry::default()],
         }
     }
 }
 
-// serde needs defaults for missing fields when loading hand-edited files.
+// Captures both the new `[[clients]]` form and the legacy single-client fields.
 #[derive(Deserialize, Default)]
 struct ServerConfigPartial {
+    heartbeat_ms: Option<u64>,
+    clipboard: Option<bool>,
+    clients: Option<Vec<ClientEntry>>,
+    // legacy single-client
     client_addr: Option<String>,
     port: Option<u16>,
     edge: Option<String>,
-    heartbeat_ms: Option<u64>,
-    clipboard: Option<bool>,
     tls: Option<bool>,
     layout: Option<LayoutConfig>,
 }
@@ -127,14 +154,36 @@ pub fn load_server_config() -> ServerConfig {
     let Ok(p) = toml::from_str::<ServerConfigPartial>(&text) else {
         return default;
     };
+
+    let clients = match p.clients {
+        Some(cs) if !cs.is_empty() => cs,
+        _ => {
+            // Synthesize one client from the legacy fields.
+            let between = p
+                .layout
+                .as_ref()
+                .filter(|l| l.mode == "between")
+                .map(|l| vec![l.monitor_left.clone(), l.monitor_right.clone()]);
+            let edge = if between.is_none() {
+                Some(p.edge.clone().unwrap_or_else(|| "right".into()))
+            } else {
+                None
+            };
+            vec![ClientEntry {
+                name: "laptop".into(),
+                addr: p.client_addr.unwrap_or_else(|| "192.168.1.42".into()),
+                port: p.port.unwrap_or(7547),
+                tls: p.tls.unwrap_or(false),
+                between,
+                edge,
+            }]
+        }
+    };
+
     ServerConfig {
-        client_addr: p.client_addr.unwrap_or(default.client_addr),
-        port: p.port.unwrap_or(default.port),
-        edge: p.edge.unwrap_or(default.edge),
         heartbeat_ms: p.heartbeat_ms.unwrap_or(default.heartbeat_ms),
         clipboard: p.clipboard.unwrap_or(default.clipboard),
-        tls: p.tls.unwrap_or(default.tls),
-        layout: p.layout,
+        clients,
     }
 }
 
