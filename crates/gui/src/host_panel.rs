@@ -78,7 +78,7 @@ impl HostPanel {
                     if status.running {
                         let total = self.cfg.clients.len();
                         let connected = (0..total)
-                            .filter(|&i| matches!(client_link_state(&status.log, i), LinkState::Connected))
+                            .filter(|&i| status.connected_mask & (1u64 << i) != 0)
                             .count();
                         ui.colored_label(egui::Color32::GREEN, "●");
                         ui.strong("Servidor en ejecución");
@@ -117,11 +117,12 @@ impl HostPanel {
                 egui::Frame::group(ui.style()).show(ui, |ui| {
                     let c = &mut self.cfg.clients[i];
                     ui.horizontal(|ui| {
-                        // Per-client connection indicator (from the server log).
-                        let (dot, col, tip) = match client_link_state(&status.log, i) {
-                            LinkState::Connected => ("●", egui::Color32::GREEN, "conectado"),
-                            LinkState::Connecting => ("◐", egui::Color32::YELLOW, "conectando…"),
-                            LinkState::Down => ("○", egui::Color32::GRAY, "sin conexión"),
+                        // Per-client connection indicator (from the status file).
+                        let connected = status.running && status.connected_mask & (1u64 << i) != 0;
+                        let (dot, col, tip) = if connected {
+                            ("●", egui::Color32::GREEN, "conectado")
+                        } else {
+                            ("○", egui::Color32::GRAY, "sin conexión")
                         };
                         ui.colored_label(col, dot).on_hover_text(tip);
                         ui.label("Nombre:");
@@ -275,40 +276,6 @@ impl HostPanel {
             });
         });
     }
-}
-
-// ─── Live status from the server log ─────────────────────────────────────────
-
-#[derive(Clone, Copy)]
-enum LinkState {
-    Connected,
-    Connecting,
-    Down,
-}
-
-/// Latest connection state for client `id`, parsed from the server log. Net
-/// lines are tagged "[client N]"; capture lines say "client N" (no brackets),
-/// so they don't interfere.
-fn client_link_state(log: &str, id: usize) -> LinkState {
-    let marker = format!("[client {id}]");
-    let mut state = LinkState::Down;
-    for line in log.lines() {
-        if !line.contains(&marker) {
-            continue;
-        }
-        if line.contains("connected to") {
-            state = LinkState::Connected;
-        } else if line.contains("connecting to") {
-            state = LinkState::Connecting;
-        } else if line.contains("disconnected")
-            || line.contains("connect failed")
-            || line.contains("connection error")
-            || line.contains("TLS handshake")
-        {
-            state = LinkState::Down;
-        }
-    }
-    state
 }
 
 // ─── Placement helpers ───────────────────────────────────────────────────────

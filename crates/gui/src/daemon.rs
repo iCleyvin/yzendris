@@ -55,6 +55,17 @@ fn log_path(t: Target) -> PathBuf {
 pub struct DaemonState {
     pub running: bool,
     pub log: String,
+    /// Server only: bitmask of connected clients (bit k = client k). Read from
+    /// the status file the server writes on each connect/disconnect.
+    pub connected_mask: u64,
+}
+
+/// Connected-clients bitmask written by the running server.
+fn read_connected_mask() -> u64 {
+    std::fs::read_to_string(crate::config_model::server_status_path())
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(0)
 }
 
 /// Polls daemon status + log on a background thread so the UI never blocks on
@@ -68,18 +79,23 @@ impl DaemonMonitor {
         let state = Arc::new(Mutex::new(DaemonState {
             running: false,
             log: String::from("(consultando…)"),
+            connected_mask: 0,
         }));
         let shared = state.clone();
         std::thread::Builder::new()
             .name("yzendris-daemon-monitor".into())
             .spawn(move || loop {
                 let running = daemon_running(target);
-                // Read a generous tail so connection events (which may be older
-                // than the latest capture activity) are still visible for the
-                // per-client status indicators.
-                let log = read_log_tail(target, 60);
+                let log = read_log_tail(target, 20);
+                // Per-client connection state comes from the server's status
+                // file (the log is unreliable — connection lines scroll away).
+                let connected_mask = if matches!(target, Target::Server) && running {
+                    read_connected_mask()
+                } else {
+                    0
+                };
                 if let Ok(mut s) = shared.lock() {
-                    *s = DaemonState { running, log };
+                    *s = DaemonState { running, log, connected_mask };
                 }
                 std::thread::sleep(Duration::from_secs(2));
             })
