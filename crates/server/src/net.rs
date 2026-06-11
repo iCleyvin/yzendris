@@ -9,6 +9,7 @@ use tracing::{error, info, warn};
 use yzendris_protocol::{recv_event, send_event, Event};
 
 pub async fn run(
+    client: usize,
     addr: &str,
     mut event_rx: mpsc::UnboundedReceiver<Event>,
     heartbeat_ms: u64,
@@ -18,17 +19,17 @@ pub async fn run(
     let mut backoff_ms: u64 = 1000;
 
     loop {
-        info!("connecting to {addr}…");
+        info!("[client {client}] connecting to {addr}…");
         match TcpStream::connect(addr).await {
             Err(e) => {
-                warn!("connect failed: {e} — retrying in {backoff_ms}ms");
+                warn!("[client {client}] connect failed: {e} — retrying in {backoff_ms}ms");
                 time::sleep(time::Duration::from_millis(backoff_ms)).await;
                 backoff_ms = (backoff_ms * 2).min(30_000);
                 continue;
             }
             Ok(stream) => {
                 backoff_ms = 1000;
-                info!("TCP connected to {addr}");
+                info!("[client {client}] TCP connected to {addr}");
 
                 let result = if let Some(ref connector) = tls_connector {
                     // Wrap in TLS.
@@ -36,31 +37,31 @@ pub async fn run(
                         .expect("static domain name");
                     match connector.connect(domain, stream).await {
                         Err(e) => {
-                            error!("TLS handshake failed: {e}");
+                            error!("[client {client}] TLS handshake failed: {e}");
                             Err(anyhow::anyhow!("TLS handshake: {e}"))
                         }
                         Ok(tls_stream) => {
-                            crate::hook::set_client_connected(true);
-                            info!("connected to {addr} (TLS OK)");
+                            crate::hook::set_client_connected(client, true);
+                            info!("[client {client}] connected to {addr} (TLS OK)");
                             let (reader, writer) = tokio::io::split(tls_stream);
-                            handle_generic(reader, writer, &mut event_rx, heartbeat_ms, clipboard_enabled).await
+                            handle_generic(client, reader, writer, &mut event_rx, heartbeat_ms, clipboard_enabled).await
                         }
                     }
                 } else {
-                    crate::hook::set_client_connected(true);
-                    info!("connected to {addr}");
+                    crate::hook::set_client_connected(client, true);
+                    info!("[client {client}] connected to {addr}");
                     let (reader, writer) = tokio::io::split(stream);
-                    handle_generic(reader, writer, &mut event_rx, heartbeat_ms, clipboard_enabled).await
+                    handle_generic(client, reader, writer, &mut event_rx, heartbeat_ms, clipboard_enabled).await
                 };
 
                 if let Err(e) = result {
-                    error!("connection error: {e}");
+                    error!("[client {client}] connection error: {e}");
                 }
 
-                crate::hook::set_client_connected(false);
-                crate::hook::release_capture_on_disconnect();
+                crate::hook::set_client_connected(client, false);
+                crate::hook::release_capture_on_disconnect(client);
                 while event_rx.try_recv().is_ok() {}
-                warn!("disconnected — reconnecting in {backoff_ms}ms");
+                warn!("[client {client}] disconnected — reconnecting in {backoff_ms}ms");
                 time::sleep(time::Duration::from_millis(backoff_ms)).await;
             }
         }
@@ -68,6 +69,7 @@ pub async fn run(
 }
 
 async fn handle_generic<R, W>(
+    client: usize,
     reader: R,
     mut writer: W,
     event_rx: &mut mpsc::UnboundedReceiver<Event>,
@@ -151,7 +153,7 @@ where
                     Some(Event::EdgeReached { edge, frac }) => {
                         // Client cursor pushed past its screen edge — hand
                         // control back on the matching Windows side.
-                        crate::hook::release_capture_toward(edge, frac);
+                        crate::hook::release_capture_toward(client, edge, frac);
                     }
                     Some(_) => { /* unexpected — ignore */ }
                     None => break Ok(()), // reader task ended (EOF or error)
