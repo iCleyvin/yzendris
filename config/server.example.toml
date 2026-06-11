@@ -1,39 +1,42 @@
-# yzendris — Windows server configuration
-# Copy to %APPDATA%\yzendris\server.toml and edit `client_addr` to your laptop's IP.
+# yzendris — Windows host (server) configuration.
+# Copy to %APPDATA%\yzendris\server.toml — or just use the GUI (yzendris-gui),
+# which writes this file for you, opens the firewall and sets up autostart.
 
-# IP or hostname of the Linux client running yzendris-client.
-client_addr = "192.168.1.42"
+# Global settings.
+heartbeat_ms = 1000   # heartbeat interval; a client drops if it stops arriving
+clipboard    = true   # sync clipboard text on capture transitions
 
-# TCP port the Linux client is listening on.
-port = 7547
-
-# Which screen edge triggers capture (cursor crosses → laptop takes over).
-# Options: "right" | "left" | "top" | "bottom"
-# Only used when [layout] below is absent or mode = "edge".
-edge = "right"
-
-# ── Multi-monitor: laptop BETWEEN two monitors ────────────────────────────────
-# If the laptop physically sits between two of this PC's monitors, uncomment
-# this section. Crossing the boundary between the two monitors routes the
-# cursor through the laptop in both directions (PC screen 1 → laptop → PC
-# screen 2), no release combo needed.
-# Monitor names are the Windows device names ("DISPLAY1", "DISPLAY2", …) —
-# the GUI (yzendris-gui) detects and writes them for you.
+# ── Clients ───────────────────────────────────────────────────────────────────
+# One [[clients]] block per machine that receives the keyboard/mouse. Each has
+# an address and a PLACEMENT: either `between` two monitors, or an outer `edge`.
+# The orientation of a `between` pair (side by side vs stacked) is detected from
+# the monitors' real positions, so a laptop stacked above/below a monitor works
+# too (the cursor crosses by the top/bottom edge).
 #
-# [layout]
-# mode = "between"
-# monitor_left  = "DISPLAY1"   # monitor at the LEFT of the laptop
-# monitor_right = "DISPLAY2"   # monitor at the RIGHT of the laptop
+# Monitor names are the Windows device names ("DISPLAY1", "DISPLAY2", …) — the
+# GUI detects and fills them in.
 
-# Heartbeat interval in ms. Client disconnects if it stops receiving these.
-heartbeat_ms = 1000
+[[clients]]
+name = "laptop"
+addr = "192.168.1.42"
+port = 7547
+tls  = true                      # verify the client cert fingerprint (recommended)
+between = ["DISPLAY1", "DISPLAY2"]  # laptop sits between these two monitors
 
-# Sync clipboard on capture transitions (server→client on CaptureStart,
-# client→server on CaptureEnd). Requires wl-clipboard on the Linux side.
-clipboard = true
+# A second client, placed at the top edge of the desktop:
+# [[clients]]
+# name = "studio-pc"
+# addr = "192.168.1.50"
+# port = 7547
+# tls  = true
+# edge = "top"                   # "right" | "left" | "top" | "bottom"
 
-# TLS with SHA-256 fingerprint pinning. Strongly recommended on any LAN you
-# don't fully trust. The Linux client generates a self-signed cert on first run
-# and prints its fingerprint; paste that fingerprint into
-# %APPDATA%\yzendris\trusted_peers.txt (one per line).
-tls = true
+# ── TLS pairing ───────────────────────────────────────────────────────────────
+# With tls = true, each client generates a self-signed cert on first run and
+# shows its fingerprint (GUI: Cliente panel). Paste each fingerprint into
+# %APPDATA%\yzendris\trusted_peers.txt (one per line) — or add it in the GUI's
+# "Huellas TLS confiables" box.
+#
+# ── Legacy single-client form (still supported) ──────────────────────────────
+# Older configs used top-level `client_addr`, `port`, `edge`, `tls` and a
+# `[layout]` table instead of [[clients]]. Those are read as a single client.

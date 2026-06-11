@@ -40,13 +40,17 @@ like a USB one plugged in. Modifiers work. Binds fire.
 - Mouse cursor crosses by hitting a configured screen edge (default: right),
   and **crosses back** when you push the matching edge of the client screen —
   no key combo needed (the combo `Ctrl+Shift+Alt` still works as an escape).
-- **Laptop-in-the-middle layouts**: with `[layout] mode = "between"` the laptop
-  sits between two of the PC's monitors — PC screen 1 → laptop → PC screen 2,
+- **Any monitor arrangement**: place a client between any two adjacent
+  monitors — **side by side** *or* **stacked** (one above the other, crossing by
+  the top/bottom edge) — or at an outer edge. PC screen 1 → laptop → PC screen 2,
   seamlessly in both directions.
-- **Graphical configurator** (`yzendris-gui`): one app for both machines — on
-  first run it asks whether the machine is the Host or a Client, detects your
-  monitors, lets you place the laptop visually, manages TLS pairing, and
-  starts/stops the daemon.
+- **Multiple clients at once**: the host can share to several machines
+  simultaneously, each at its own boundary/edge (`[[clients]]`).
+- **Graphical configurator is the main path** (`yzendris-gui`): one app for both
+  machines — on first run it asks whether the machine is the Host or a Client,
+  detects your monitors, lets you add clients and place each one, manages TLS
+  pairing, and with one click **installs everything** (copies the program, opens
+  the firewall, enables autostart). No terminal or config files required.
 - All keys including `Super` / `Ctrl` / `Alt` and combinations of them work.
 - Mouse buttons (L/M/R/side1/side2), scroll (vertical and horizontal).
 - Bidirectional clipboard sync on capture transitions.
