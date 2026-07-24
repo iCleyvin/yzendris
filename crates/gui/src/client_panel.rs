@@ -11,6 +11,9 @@ use crate::setup;
 pub struct ClientPanel {
     cfg: ClientConfig,
     fingerprint: Option<String>,
+    /// Host fingerprints we accept — pinning runs both ways.
+    trusted: Vec<String>,
+    new_fingerprint: String,
     status_msg: String,
     monitor: daemon::DaemonMonitor,
     setup_status: std::sync::Arc<std::sync::Mutex<Option<String>>>,
@@ -20,7 +23,9 @@ impl ClientPanel {
     pub fn new() -> Self {
         Self {
             cfg: config_model::load_client_config(),
-            fingerprint: read_fingerprint(),
+            fingerprint: config_model::own_fingerprint(),
+            trusted: config_model::load_trusted_peers(),
+            new_fingerprint: String::new(),
             status_msg: String::new(),
             monitor: daemon::DaemonMonitor::new(daemon::Target::Client),
             setup_status: std::sync::Arc::new(std::sync::Mutex::new(None)),
@@ -44,7 +49,7 @@ impl ClientPanel {
     pub fn ui(&mut self, ui: &mut egui::Ui) {
         let status = self.monitor.snapshot();
         if self.fingerprint.is_none() {
-            self.fingerprint = read_fingerprint();
+            self.fingerprint = config_model::own_fingerprint();
         }
         ui.ctx().request_repaint_after(Duration::from_secs(1));
 
@@ -94,6 +99,50 @@ impl ClientPanel {
                              activado y volverá a aparecer aquí.",
                         );
                     }
+                }
+
+                ui.add_space(10.0);
+                ui.heading("Huellas TLS confiables");
+                ui.label(
+                    "Pega aquí la huella del Host (panel Host → \"Huella TLS de este host\"). \
+                     Sin ella se rechaza cualquier conexión: es lo que impide que otra máquina \
+                     de la red se conecte y escriba en tu equipo.",
+                );
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.new_fingerprint)
+                            .hint_text("sha256:aa:bb:cc:…")
+                            .desired_width(420.0),
+                    );
+                    if ui.button("Agregar").clicked() {
+                        let fp = self.new_fingerprint.trim().to_owned();
+                        if !fp.is_empty() && !self.trusted.contains(&fp) {
+                            self.trusted.push(fp);
+                            let _ = config_model::save_trusted_peers(&self.trusted);
+                            self.new_fingerprint.clear();
+                            daemon::restart_async(daemon::Target::Client);
+                        }
+                    }
+                });
+                if self.trusted.is_empty() {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(240, 180, 80),
+                        "⚠ Ninguna huella confiable — el cliente rechazará toda conexión.",
+                    );
+                }
+                let mut remove_fp: Option<usize> = None;
+                for (i, fp) in self.trusted.iter().enumerate() {
+                    ui.horizontal(|ui| {
+                        ui.monospace(fp);
+                        if ui.small_button("🗑").clicked() {
+                            remove_fp = Some(i);
+                        }
+                    });
+                }
+                if let Some(i) = remove_fp {
+                    self.trusted.remove(i);
+                    let _ = config_model::save_trusted_peers(&self.trusted);
+                    daemon::restart_async(daemon::Target::Client);
                 }
             }
 
@@ -164,14 +213,3 @@ impl ClientPanel {
     }
 }
 
-/// SHA-256 fingerprint of the client certificate, matching the format the
-/// client daemon prints (`sha256:aa:bb:…`). Works on both Linux and Windows —
-/// the client generates `cert.pem` in the config dir on either OS.
-fn read_fingerprint() -> Option<String> {
-    use sha2::{Digest, Sha256};
-    let pem = std::fs::read(config_model::config_dir().join("cert.pem")).ok()?;
-    let cert = rustls_pemfile::certs(&mut pem.as_slice()).next()?.ok()?;
-    let hash = Sha256::digest(cert.as_ref());
-    let hex: Vec<String> = hash.iter().map(|b| format!("{b:02x}")).collect();
-    Some(format!("sha256:{}", hex.join(":")))
-}

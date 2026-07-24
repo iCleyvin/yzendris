@@ -24,6 +24,8 @@ pub struct HostPanel {
     monitors: Vec<MonitorInfo>,
     trusted: Vec<String>,
     new_fingerprint: String,
+    /// This host's own fingerprint — the client pins it back (mutual TLS).
+    fingerprint: Option<String>,
     status_msg: String,
     monitor: daemon::DaemonMonitor,
     setup_status: std::sync::Arc<std::sync::Mutex<Option<String>>>,
@@ -36,6 +38,7 @@ impl HostPanel {
             monitors: monitors::enumerate(),
             trusted: config_model::load_trusted_peers(),
             new_fingerprint: String::new(),
+            fingerprint: config_model::own_fingerprint(),
             status_msg: String::new(),
             monitor: daemon::DaemonMonitor::new(daemon::Target::Server),
             setup_status: std::sync::Arc::new(std::sync::Mutex::new(None)),
@@ -202,6 +205,30 @@ impl HostPanel {
 
             // ── TLS pairing ─────────────────────────────────────────────────
             if self.any_tls() {
+                if self.fingerprint.is_none() {
+                    self.fingerprint = config_model::own_fingerprint();
+                }
+
+                ui.add_space(10.0);
+                ui.heading("Huella TLS de este host");
+                match &self.fingerprint {
+                    Some(fp) => {
+                        ui.label("Agrega esta huella en cada cliente (panel Cliente → \"Huellas TLS confiables\"):");
+                        ui.horizontal(|ui| {
+                            ui.monospace(shorten(fp, 56));
+                            if ui.small_button("📋 Copiar").clicked() {
+                                ui.ctx().copy_text(fp.clone());
+                            }
+                        });
+                    }
+                    None => {
+                        ui.label(
+                            "El certificado aún no existe — inicia el servidor una vez con TLS \
+                             activado y la huella aparecerá aquí.",
+                        );
+                    }
+                }
+
                 ui.add_space(10.0);
                 ui.heading("Huellas TLS confiables");
                 ui.label("Pega la huella que muestra cada cliente (panel Cliente) al activar TLS:");
@@ -623,7 +650,7 @@ fn arrangement_editor(
                 painter.circle_stroke(
                     to_screen(cands[n].1),
                     10.0,
-                    egui::Stroke::new(2.0, egui::Color32::from_rgb(150, 250, 190)),
+                    egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(150, 250, 190)),
                 );
             }
             ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
@@ -682,7 +709,7 @@ fn arrangement_editor(
             _ => to_screen_rect(*r),
         };
         painter.rect_filled(sr, 4.0, egui::Color32::from_gray(45));
-        painter.rect_stroke(sr, 4.0, egui::Stroke::new(1.5, egui::Color32::from_gray(150)), egui::StrokeKind::Inside);
+        painter.rect_stroke(sr, 4.0, egui::Stroke::new(1.5_f32, egui::Color32::from_gray(150)), egui::StrokeKind::Inside);
         painter.text(
             sr.center(),
             egui::Align2::CENTER_CENTER,
@@ -700,7 +727,7 @@ fn arrangement_editor(
             (egui::Color32::from_rgb(35, 110, 65), egui::Color32::from_rgb(110, 230, 150))
         };
         painter.rect_filled(br, 6.0, fill);
-        painter.rect_stroke(br, 6.0, egui::Stroke::new(1.5, stroke), egui::StrokeKind::Inside);
+        painter.rect_stroke(br, 6.0, egui::Stroke::new(1.5_f32, stroke), egui::StrokeKind::Inside);
         painter.text(
             br.center(),
             egui::Align2::CENTER_CENTER,

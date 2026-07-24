@@ -1,0 +1,6 @@
+# Rust build artifacts
+/target/
+
+# Local TLS material and config generated at runtime — never commit these.
+*.pem
+trusted_peers.txt

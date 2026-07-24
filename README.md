@@ -130,9 +130,11 @@ Run **`yzendris-gui`** on each machine and follow it:
 3. Click **⚙ Instalar y habilitar inicio automático** on each machine. With one
    administrator prompt it copies the program, opens the firewall and enables
    autostart — nothing else to do by hand.
-4. **Pair TLS once:** on each client the panel shows a fingerprint
-   (`sha256:…`) — copy it and paste it into the host's *Huellas TLS confiables*
-   box. (Skip if you set `tls = false`.)
+4. **Pair TLS once, both ways:** each panel shows that machine's own
+   fingerprint (`sha256:…`) and has a *Huellas TLS confiables* box. Paste the
+   client's fingerprint into the host, and the host's fingerprint into the
+   client. Pinning is mutual, so both directions are required. (Skip if you set
+   `tls = false`.)
 5. Press **▶ Iniciar** on both. The top of the host panel shows
    *“Servidor en ejecución”* and a green dot per connected client.
 
@@ -160,17 +162,24 @@ Then edit the config (see the reference below) and pair TLS as in step 4.
 
 ### Manual pairing reference
 
-Each client generates a self-signed certificate on first run with `tls = true`
-and prints its SHA-256 fingerprint:
+Both roles generate a self-signed certificate on first run with `tls = true`
+and log its SHA-256 fingerprint:
 
 ```bash
-# Linux
+# Linux client
 journalctl --user -u yzendris-client -e   # → "TLS fingerprint: sha256:aa:bb:…"
-# Windows: see %APPDATA%\yzendris\client.log, or the GUI Cliente panel
+# Windows: see %APPDATA%\yzendris\server.log / client.log, or the GUI panels
 ```
 
-Paste each fingerprint (one per line, `#` comments allowed) into the host's
-`%APPDATA%\yzendris\trusted_peers.txt`, then restart the host.
+Each side keeps a `trusted_peers.txt` in its config dir (`%APPDATA%\yzendris\`
+on Windows, `~/.config/yzendris/` on Linux) holding the *other* side's
+fingerprints, one per line, `#` comments allowed:
+
+- host's `trusted_peers.txt` → every client's fingerprint
+- each client's `trusted_peers.txt` → the host's fingerprint
+
+Restart both after editing. A rejected handshake logs the fingerprint it saw,
+so if you're missing one, start the pair and read the log.
 
 ## Configuration reference
 
@@ -215,11 +224,20 @@ still read for backward compatibility.
 ## Security model — read this before exposing it on a hostile network
 
 - All keystrokes go over the wire. **Always run with `tls = true`.** Without
-  TLS, anyone on your LAN with `tcpdump` can keylog you.
-- The TLS verifier is a custom one that pins the peer cert's SHA-256
-  fingerprint. There's no PKI / CA chain. If your machine is compromised
-  enough to swap `trusted_peers.txt`, an attacker can MITM the next
-  connection — but at that point they already own you.
+  TLS, anyone on your LAN with `tcpdump` can keylog you — and anyone at all can
+  connect to the client's port and type on your machine.
+- Pinning is **mutual**: each side has its own self-signed cert and a
+  `trusted_peers.txt` listing the SHA-256 fingerprint of the other. The host
+  checks the client's; the client checks the host's. Both are fail-closed — an
+  empty `trusted_peers.txt` rejects every connection, and the rejected
+  handshake logs the fingerprint you need to paste in. There's no PKI / CA
+  chain. If your machine is compromised enough to swap `trusted_peers.txt`, an
+  attacker can MITM the next connection — but at that point they already own
+  you.
+- Client-side pinning is what stops a stranger on the same LAN from connecting
+  to port 7547 and injecting keystrokes through `/dev/uinput`. On a network you
+  don't control (office, campus, café), also restrict the port to the host's
+  address: `sudo ufw allow from <host-ip> to any port 7547 proto tcp`.
 - The Linux side runs as your user, not as root. It uses `/dev/uinput` via
   the `input` group. No setuid binaries.
 - Designed for trusted LANs. **Don't expose port 7547 to the internet.** If

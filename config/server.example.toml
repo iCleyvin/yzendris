@@ -31,11 +31,18 @@ between = ["DISPLAY1", "DISPLAY2"]  # laptop sits between these two monitors
 # tls  = true
 # edge = "top"                   # "right" | "left" | "top" | "bottom"
 
-# ── TLS pairing ───────────────────────────────────────────────────────────────
-# With tls = true, each client generates a self-signed cert on first run and
-# shows its fingerprint (GUI: Cliente panel). Paste each fingerprint into
-# %APPDATA%\yzendris\trusted_peers.txt (one per line) — or add it in the GUI's
-# "Huellas TLS confiables" box.
+# ── TLS pairing (mutual) ──────────────────────────────────────────────────────
+# With tls = true, BOTH sides generate a self-signed cert on first run and pin
+# the other's fingerprint — the client checks the host just as the host checks
+# the client.
+#
+#   1. Paste each client's fingerprint (GUI: Cliente panel) into
+#      %APPDATA%\yzendris\trusted_peers.txt, one per line — or use the GUI's
+#      "Huellas TLS confiables" box.
+#   2. Paste THIS host's fingerprint (GUI: Host panel, or the "TLS fingerprint
+#      of this host" line in server.log) into each client's trusted_peers.txt.
+#
+# Both checks are fail-closed: an empty trusted_peers.txt rejects everything.
 #
 # ── Legacy single-client form (still supported) ──────────────────────────────
 # Older configs used top-level `client_addr`, `port`, `edge`, `tls` and a

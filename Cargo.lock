@@ -3760,7 +3760,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bincode",
+ "rcgen",
  "rustls",
+ "rustls-pemfile",
  "serde",
  "sha2",
  "tokio",

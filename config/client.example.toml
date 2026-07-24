@@ -19,8 +19,14 @@ heartbeat_timeout_ms = 5000
 # Sync clipboard on capture transitions. Requires wl-clipboard on PATH.
 clipboard = true
 
-# TLS with SHA-256 fingerprint pinning. On first run with tls=true a
-# self-signed certificate is generated in ~/.config/yzendris/ and its
+# TLS with SHA-256 fingerprint pinning, in BOTH directions. On first run with
+# tls=true a self-signed certificate is generated in ~/.config/yzendris/ and its
 # fingerprint is printed to stderr — paste it into the Windows server's
-# trusted_peers.txt to complete the pairing.
+# trusted_peers.txt.
+#
+# You must also paste the SERVER's fingerprint into
+# ~/.config/yzendris/trusted_peers.txt (one per line). Without it every
+# connection is refused: that check is what stops anyone else on the LAN from
+# connecting here and injecting keystrokes. A rejected handshake logs the
+# fingerprint it saw, so start the host once and read the log if you need it.
 tls = true

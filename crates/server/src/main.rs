@@ -265,15 +265,24 @@ async fn async_main() -> Result<()> {
 
     // Build one TLS connector (shared) if any client uses TLS.
     let tls_connector = if clients.iter().any(|c| c.tls) {
-        let trusted_path = std::env::var_os("APPDATA")
-            .map(|d| std::path::PathBuf::from(d).join("yzendris").join("trusted_peers.txt"))
-            .unwrap_or_else(|| std::path::PathBuf::from("trusted_peers.txt"));
+        let config_dir = std::env::var_os("APPDATA")
+            .map(|d| std::path::PathBuf::from(d).join("yzendris"))
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let trusted_path = config_dir.join("trusted_peers.txt");
         let trusted = tls::load_trusted(&trusted_path);
         info!("TLS enabled — {} trusted fingerprint(s)", trusted.len());
         if trusted.is_empty() {
             tracing::warn!("No trusted fingerprints in {}", trusted_path.display());
         }
-        Some(tls::make_connector(trusted).context("build TLS connector")?)
+
+        // We now authenticate ourselves to the client too (mutual pinning), so
+        // we need our own certificate. Log its fingerprint — it goes in each
+        // client's trusted_peers.txt.
+        let (cert_chain, key) =
+            tls::load_or_generate_cert(&config_dir).context("loading/generating TLS cert")?;
+        info!("TLS fingerprint of this host: {}", tls::fingerprint(&cert_chain[0]));
+
+        Some(tls::make_connector(trusted, cert_chain, key).context("build TLS connector")?)
     } else {
         None
     };

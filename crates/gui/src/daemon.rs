@@ -34,6 +34,9 @@ fn exe_name(t: Target) -> &'static str {
     }
 }
 
+// Only the Windows control path reads these; on Linux systemd owns start/stop
+// and journald owns the log.
+#[cfg_attr(not(windows), allow(dead_code))]
 fn config_path(t: Target) -> PathBuf {
     match t {
         Target::Server => crate::config_model::server_config_path(),
@@ -41,6 +44,7 @@ fn config_path(t: Target) -> PathBuf {
     }
 }
 
+#[cfg_attr(not(windows), allow(dead_code))]
 fn log_path(t: Target) -> PathBuf {
     match t {
         Target::Server => crate::config_model::server_log_path(),
@@ -173,6 +177,8 @@ fn quiet_command(program: &str) -> std::process::Command {
 }
 
 /// Public wrapper so the setup module can find a daemon binary to copy.
+/// Only `setup::enable`'s Windows arm calls it.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub fn locate_binary(name: &str) -> Option<PathBuf> {
     find_daemon_binary(name)
 }
@@ -191,8 +197,13 @@ fn find_daemon_binary(name: &str) -> Option<PathBuf> {
     if let Some(home) = std::env::var_os("HOME") {
         candidates.push(PathBuf::from(home).join(".local/bin").join(name));
     }
-    candidates.push(PathBuf::from("target/release").join(name));
-    candidates.push(PathBuf::from("target/debug").join(name));
+    // Dev builds: resolve against the CWD *explicitly*. Left as bare relative
+    // paths these silently depended on wherever the GUI happened to be started
+    // from — from a desktop launcher that is not the repo root.
+    if let Ok(cwd) = std::env::current_dir() {
+        candidates.push(cwd.join("target/release").join(name));
+        candidates.push(cwd.join("target/debug").join(name));
+    }
 
     candidates.into_iter().find(|p| p.exists())
 }

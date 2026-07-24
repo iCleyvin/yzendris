@@ -55,6 +55,32 @@ pub const EDGE_TOP: u8 = 3;
 /// Maximum allowed frame size (64 KiB) — protects against corrupt streams.
 const MAX_FRAME: u32 = 65536;
 
+/// Largest clipboard payload we put on the wire.
+///
+/// `MAX_FRAME` is enforced by the *receiver*, which bails out and tears the
+/// connection down when a frame exceeds it. Clipboard text is the only event
+/// that can grow without bound, so copying a large document would otherwise
+/// drop the KVM link and force a reconnect. Cap it here instead, leaving
+/// headroom for bincode's enum discriminant and string length prefix.
+pub const MAX_CLIPBOARD_BYTES: usize = 60_000;
+
+impl Event {
+    /// Build a `ClipboardText`, truncating oversized text at a UTF-8 character
+    /// boundary so the frame always fits. Returns whether it was truncated so
+    /// the caller can log it.
+    pub fn clipboard_text(mut text: String) -> (Self, bool) {
+        let truncated = text.len() > MAX_CLIPBOARD_BYTES;
+        if truncated {
+            let mut end = MAX_CLIPBOARD_BYTES;
+            while end > 0 && !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            text.truncate(end);
+        }
+        (Event::ClipboardText { text }, truncated)
+    }
+}
+
 /// Write one `Event` as a length-prefixed frame to an `AsyncWrite`.
 pub async fn send_event<W: AsyncWrite + Unpin>(writer: &mut W, event: &Event) -> anyhow::Result<()> {
     let payload = bincode::serialize(event).context("bincode serialize")?;

@@ -30,7 +30,10 @@ pub fn server_config_path() -> PathBuf { config_dir().join("server.toml") }
 pub fn client_config_path() -> PathBuf { config_dir().join("client.toml") }
 pub fn gui_config_path()    -> PathBuf { config_dir().join("gui.toml") }
 pub fn trusted_peers_path() -> PathBuf { config_dir().join("trusted_peers.txt") }
+// The daemons only write these on Windows; on Linux logging goes to journald.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub fn server_log_path()    -> PathBuf { config_dir().join("server.log") }
+#[cfg_attr(not(windows), allow(dead_code))]
 pub fn client_log_path()    -> PathBuf { config_dir().join("client.log") }
 pub fn server_status_path() -> PathBuf { config_dir().join("status") }
 
@@ -280,4 +283,19 @@ pub fn save_trusted_peers(peers: &[String]) -> anyhow::Result<()> {
     }
     std::fs::write(trusted_peers_path(), text)?;
     Ok(())
+}
+
+/// SHA-256 fingerprint of this machine's own certificate, in the same format
+/// the daemons print (`sha256:aa:bb:…`).
+///
+/// Both roles need it now that pinning is mutual: the host pastes the client's
+/// fingerprint and the client pastes the host's. Each daemon writes `cert.pem`
+/// into the shared config dir on first run with `tls = true`.
+pub fn own_fingerprint() -> Option<String> {
+    use sha2::{Digest, Sha256};
+    let pem = std::fs::read(config_dir().join("cert.pem")).ok()?;
+    let cert = rustls_pemfile::certs(&mut pem.as_slice()).next()?.ok()?;
+    let hash = Sha256::digest(cert.as_ref());
+    let hex: Vec<String> = hash.iter().map(|b| format!("{b:02x}")).collect();
+    Some(format!("sha256:{}", hex.join(":")))
 }

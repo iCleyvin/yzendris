@@ -8,12 +8,56 @@ use anyhow::{Context, Result};
 use rustls::{
     client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
     crypto::{ring as crypto_ring, verify_tls12_signature, verify_tls13_signature},
-    pki_types::{CertificateDer, ServerName, UnixTime},
+    pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime},
     DigitallySignedStruct, Error as TlsError, SignatureScheme,
 };
 use std::{path::Path, sync::Arc};
 use tokio_rustls::TlsConnector;
 use tracing::{info, warn};
+
+// ─── Our own identity ────────────────────────────────────────────────────────
+
+/// Load or generate this host's TLS certificate, mirroring what the client
+/// does. The client pins our fingerprint the same way we pin its one, so the
+/// host needs an identity of its own to present during the handshake.
+pub fn load_or_generate_cert(
+    config_dir: &Path,
+) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
+    let cert_path = config_dir.join("cert.pem");
+    let key_path = config_dir.join("key.pem");
+
+    if cert_path.exists() && key_path.exists() {
+        return load_cert(&cert_path, &key_path);
+    }
+
+    use rcgen::{generate_simple_self_signed, CertifiedKey};
+    let CertifiedKey { cert, key_pair } = generate_simple_self_signed(vec!["yzendris".to_string()])
+        .context("generate self-signed cert")?;
+
+    std::fs::create_dir_all(config_dir).context("create config dir")?;
+    std::fs::write(&cert_path, cert.pem()).context("write cert.pem")?;
+    std::fs::write(&key_path, key_pair.serialize_pem()).context("write key.pem")?;
+    info!("TLS: generated new self-signed cert → {}", cert_path.display());
+
+    load_cert(&cert_path, &key_path)
+}
+
+fn load_cert(
+    cert_path: &Path,
+    key_path: &Path,
+) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
+    let cert_pem = std::fs::read(cert_path).context("reading cert.pem")?;
+    let key_pem = std::fs::read(key_path).context("reading key.pem")?;
+
+    let certs = rustls_pemfile::certs(&mut cert_pem.as_slice())
+        .collect::<Result<Vec<_>, _>>()
+        .context("parse cert.pem")?;
+    let key = rustls_pemfile::private_key(&mut key_pem.as_slice())
+        .context("parse key.pem")?
+        .context("no private key in key.pem")?;
+
+    Ok((certs, key))
+}
 
 // ─── Fingerprint helpers ──────────────────────────────────────────────────────
 
@@ -131,12 +175,18 @@ impl ServerCertVerifier for FingerprintVerifier {
 
 // ─── TlsConnector factory ─────────────────────────────────────────────────────
 
-/// Build a `TlsConnector` that verifies the peer fingerprint.
-pub fn make_connector(trusted: Vec<String>) -> Result<TlsConnector> {
+/// Build a `TlsConnector` that verifies the peer fingerprint AND presents our
+/// own certificate, so the client can pin us back.
+pub fn make_connector(
+    trusted: Vec<String>,
+    cert_chain: Vec<CertificateDer<'static>>,
+    key: PrivateKeyDer<'static>,
+) -> Result<TlsConnector> {
     let verifier = Arc::new(FingerprintVerifier::new(trusted));
     let config = rustls::ClientConfig::builder()
         .dangerous()
         .with_custom_certificate_verifier(verifier)
-        .with_no_client_auth();
+        .with_client_auth_cert(cert_chain, key)
+        .context("build ClientConfig with client auth")?;
     Ok(TlsConnector::from(Arc::new(config)))
 }

@@ -128,7 +128,12 @@ where
                 // On CaptureStart, piggyback the Windows clipboard.
                 if matches!(event, Event::CaptureStart) && clipboard_enabled {
                     if let Some(text) = crate::clipboard::read() {
-                        if let Err(e) = send_event(&mut writer, &Event::ClipboardText { text }).await {
+                        let (clip, truncated) = Event::clipboard_text(text);
+                        if truncated {
+                            warn!("[client {client}] clipboard truncated to {} bytes",
+                                  yzendris_protocol::MAX_CLIPBOARD_BYTES);
+                        }
+                        if let Err(e) = send_event(&mut writer, &clip).await {
                             break Err(e).context("send clipboard");
                         }
                     }

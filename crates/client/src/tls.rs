@@ -55,11 +55,34 @@ fn generate_cert(
 
     std::fs::create_dir_all(config_dir).context("create config dir")?;
     std::fs::write(cert_path, &cert_pem).context("write cert.pem")?;
-    std::fs::write(key_path,  &key_pem).context("write key.pem")?;
+    write_private_key(key_path, &key_pem).context("write key.pem")?;
 
     tracing::info!("TLS: generated new self-signed cert → {}", cert_path.display());
 
     load_cert(cert_path, key_path)
+}
+
+/// Write the private key with owner-only permissions. `std::fs::write` would
+/// leave it world-readable under the usual 022 umask, and this key is what
+/// proves our identity to the host.
+fn write_private_key(path: &Path, pem: &str) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        f.write_all(pem.as_bytes())
+    }
+    #[cfg(not(unix))]
+    {
+        // On Windows the per-user config dir is already ACL'd to the account.
+        std::fs::write(path, pem)
+    }
 }
 
 /// Compute the SHA-256 fingerprint of a DER certificate.
@@ -71,13 +94,111 @@ pub fn fingerprint(cert: &CertificateDer<'_>) -> String {
     format!("sha256:{}", hex_pairs.join(":"))
 }
 
-/// Build a `TlsAcceptor` from the cert and key.
+/// Load trusted host fingerprints from `trusted_peers.txt` (one per line,
+/// `#` comments allowed). Same file format the host uses for our fingerprint.
+pub fn load_trusted(config_dir: &Path) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(config_dir.join("trusted_peers.txt")) else {
+        return Vec::new();
+    };
+    text.lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(|l| l.to_owned())
+        .collect()
+}
+
+/// Verifies the *host's* certificate by pinned SHA-256 fingerprint.
+///
+/// Without this the client accepted any TLS peer: the pinning was one-way (the
+/// host checked us, we checked nobody), so anyone on the LAN could connect to
+/// the listening port and inject keystrokes and mouse input through uinput.
+#[derive(Debug)]
+struct FingerprintClientVerifier {
+    trusted: Vec<String>,
+    provider: rustls::crypto::CryptoProvider,
+    /// We accept any issuer — the pin is on the leaf, not a chain.
+    no_hints: Vec<rustls::DistinguishedName>,
+}
+
+impl rustls::server::danger::ClientCertVerifier for FingerprintClientVerifier {
+    fn offer_client_auth(&self) -> bool {
+        true
+    }
+
+    fn client_auth_mandatory(&self) -> bool {
+        true
+    }
+
+    fn root_hint_subjects(&self) -> &[rustls::DistinguishedName] {
+        &self.no_hints
+    }
+
+    fn verify_client_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::server::danger::ClientCertVerified, rustls::Error> {
+        let fp = fingerprint(end_entity);
+        if self.trusted.contains(&fp) {
+            tracing::info!("TLS: verified host fingerprint {}", &fp[..40]);
+            Ok(rustls::server::danger::ClientCertVerified::assertion())
+        } else {
+            tracing::warn!("TLS: UNTRUSTED host fingerprint {fp}");
+            tracing::warn!("Add it to trusted_peers.txt in the config dir and restart the client.");
+            Err(rustls::Error::General(format!("untrusted host fingerprint: {fp}")))
+        }
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.provider
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
+}
+
+/// Build a `TlsAcceptor` that presents our cert AND requires the connecting
+/// host to present one whose fingerprint is in `trusted`.
 pub fn make_acceptor(
     cert_chain: Vec<CertificateDer<'static>>,
     key: PrivateKeyDer<'static>,
+    trusted: Vec<String>,
 ) -> Result<TlsAcceptor> {
+    let verifier = Arc::new(FingerprintClientVerifier {
+        trusted,
+        provider: rustls::crypto::ring::default_provider(),
+        no_hints: Vec::new(),
+    });
     let config = rustls::ServerConfig::builder()
-        .with_no_client_auth()
+        .with_client_cert_verifier(verifier)
         .with_single_cert(cert_chain, key)
         .context("build ServerConfig")?;
     Ok(TlsAcceptor::from(Arc::new(config)))

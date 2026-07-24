@@ -7,20 +7,26 @@ use tokio::{net::TcpListener, sync::mpsc};
 use tracing::{info, warn};
 use yzendris_protocol::{recv_event, send_event, Event};
 
-/// Run one accept → receive → forward cycle.
-/// When the connection drops the function returns; the caller reconnects.
+/// Bind the listening socket. Done once, outside the accept loop: rebinding
+/// per connection left the port unbound between sessions, so a host that
+/// reconnected quickly hit a closed port and had to back off.
+pub async fn bind(addr: &str, tls: bool) -> Result<TcpListener> {
+    let listener = TcpListener::bind(addr).await.context("bind TCP")?;
+    info!("listening on {addr} (TLS: {tls})");
+    Ok(listener)
+}
+
+/// Run one accept → receive → forward cycle on an already-bound listener.
+/// When the connection drops the function returns; the caller loops.
 /// `out_rx` carries client→server events (EdgeReached) from the injector.
 pub async fn run_once(
-    addr: &str,
+    listener: &TcpListener,
     tx: mpsc::UnboundedSender<Event>,
     out_rx: mpsc::UnboundedReceiver<Event>,
     heartbeat_timeout_ms: u64,
     clipboard_enabled: bool,
     tls_acceptor: Option<&tokio_rustls::TlsAcceptor>,
 ) -> Result<()> {
-    let listener = TcpListener::bind(addr).await.context("bind TCP")?;
-    info!("listening on {addr} (TLS: {})", tls_acceptor.is_some());
-
     let (tcp_stream, peer) = listener.accept().await.context("accept")?;
     info!("server connected from {peer}");
 
@@ -112,7 +118,12 @@ where
                 if clipboard_enabled {
                     if let Some(text) = crate::clipboard::read() {
                         info!("clipboard Linux→Windows ({} chars)", text.len());
-                        let _ = wtx.send(Event::ClipboardText { text });
+                        let (clip, truncated) = Event::clipboard_text(text);
+                        if truncated {
+                            warn!("clipboard truncated to {} bytes",
+                                  yzendris_protocol::MAX_CLIPBOARD_BYTES);
+                        }
+                        let _ = wtx.send(clip);
                     }
                 }
                 let _ = tx.send(Event::CaptureEnd);

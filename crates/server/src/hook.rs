@@ -28,8 +28,8 @@ use windows::Win32::{
         SetWindowsHookExW, ShowCursor, TranslateMessage, UnhookWindowsHookEx,
         WH_KEYBOARD_LL, WH_MOUSE_LL,
         WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP,
-        WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP,
-        WM_XBUTTONDOWN, WM_XBUTTONUP,
+        WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUIT, WM_RBUTTONDOWN,
+        WM_RBUTTONUP, WM_XBUTTONDOWN, WM_XBUTTONUP,
     },
 };
 
@@ -110,59 +110,57 @@ static CAPTURE_CENTER_Y: AtomicI32 = AtomicI32::new(540);
 /// Guards against the hook seeing the SetCursorPos call as a real delta.
 static RESETTING_CURSOR: AtomicBool = AtomicBool::new(false);
 
-// ─── Per-thread key state (hook thread only) ─────────────────────────────────
+// ─── Held-key state ──────────────────────────────────────────────────────────
 //
 // 512-bit bitmask of currently-held evdev keycodes.  Code N lives in bit
 // (N % 64) of word (N / 64).  Covers codes 0–511 which includes all standard
 // keyboard keys AND mouse buttons (BTN_LEFT=0x110=272, fits in word 4).
 //
-// This is thread-local because the hook proc is always called on the hook
-// thread (the one that installed the hook and runs GetMessage).
+// This has to be GLOBAL, not thread-local. The hook proc writes it from the
+// hook thread, but `release_capture_toward` and `release_capture_on_disconnect`
+// read and clear it from a Tokio worker (see net.rs). With a thread_local those
+// two only ever touched the worker's own empty copy: `SyncKeys` always went out
+// empty, and the hook thread's bits were never cleared — so after a hand-back
+// the auto-repeat guard in `kb_proc` swallowed the next real press of every key
+// that had been held.
 
-thread_local! {
-    static HELD_KEYS: std::cell::RefCell<[u64; 8]> =
-        const { std::cell::RefCell::new([0u64; 8]) };
-}
+static HELD_KEYS: [AtomicU64; 8] = [const { AtomicU64::new(0) }; 8];
 
 fn held_key_set(code: u16, down: bool) {
     let idx = code as usize / 64;
-    let bit = code as usize % 64;
+    let bit = 1u64 << (code as usize % 64);
     if idx < 8 {
-        HELD_KEYS.with(|hk| {
-            let mut h = hk.borrow_mut();
-            if down { h[idx] |=  1u64 << bit; }
-            else    { h[idx] &= !(1u64 << bit); }
-        });
+        if down {
+            HELD_KEYS[idx].fetch_or(bit, Ordering::Relaxed);
+        } else {
+            HELD_KEYS[idx].fetch_and(!bit, Ordering::Relaxed);
+        }
     }
 }
 
 fn held_keys_collect() -> Vec<u16> {
-    HELD_KEYS.with(|hk| {
-        let h = hk.borrow();
-        let mut out = Vec::new();
-        for (slot, &word) in h.iter().enumerate() {
-            let mut w = word;
-            while w != 0 {
-                let bit = w.trailing_zeros() as usize;
-                out.push((slot * 64 + bit) as u16);
-                w &= w - 1; // clear lowest set bit
-            }
+    let mut out = Vec::new();
+    for (slot, word) in HELD_KEYS.iter().enumerate() {
+        let mut w = word.load(Ordering::Relaxed);
+        while w != 0 {
+            let bit = w.trailing_zeros() as usize;
+            out.push((slot * 64 + bit) as u16);
+            w &= w - 1; // clear lowest set bit
         }
-        out
-    })
+    }
+    out
 }
 
 fn held_keys_clear() {
-    HELD_KEYS.with(|hk| *hk.borrow_mut() = [0u64; 8]);
+    for word in HELD_KEYS.iter() {
+        word.store(0, Ordering::Relaxed);
+    }
 }
 
 fn held_key_is_set(code: u16) -> bool {
     let idx = code as usize / 64;
-    let bit = code as usize % 64;
-    if idx >= 8 {
-        return false;
-    }
-    HELD_KEYS.with(|hk| hk.borrow()[idx] & (1u64 << bit) != 0)
+    let bit = 1u64 << (code as usize % 64);
+    idx < 8 && HELD_KEYS[idx].load(Ordering::Relaxed) & bit != 0
 }
 
 // ─── Public API ──────────────────────────────────────────────────────────────
@@ -508,6 +506,16 @@ unsafe extern "system" fn ms_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> 
                 let raw_delta = (ms.mouseData >> 16) as i16;
                 let clicks = raw_delta as i32 / 120;
                 if clicks != 0 { send(Event::Scroll { dx: 0, dy: clicks }); }
+                return LRESULT(1);
+            }
+            WM_MOUSEHWHEEL => {
+                // Same WHEEL_DELTA units as the vertical wheel. Windows counts
+                // a positive delta as a tilt/scroll to the RIGHT, which matches
+                // evdev REL_HWHEEL's positive-is-right convention, so the sign
+                // passes straight through.
+                let raw_delta = (ms.mouseData >> 16) as i16;
+                let clicks = raw_delta as i32 / 120;
+                if clicks != 0 { send(Event::Scroll { dx: clicks, dy: 0 }); }
                 return LRESULT(1);
             }
             _ => return LRESULT(1),

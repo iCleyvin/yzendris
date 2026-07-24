@@ -193,7 +193,21 @@ async fn async_main() -> Result<()> {
         eprintln!("{fp}");
         eprintln!("===============================================================");
 
-        Some(tls::make_acceptor(cert_chain, key).context("build TLS acceptor")?)
+        // Pinning goes BOTH ways: we also require the host to prove itself,
+        // otherwise anyone on the LAN could connect here and type on our behalf.
+        let trusted = tls::load_trusted(&config_dir);
+        if trusted.is_empty() {
+            warn!(
+                "no trusted host fingerprints in {} — every connection will be \
+                 refused until you add the host's fingerprint (it is logged on \
+                 each rejected handshake)",
+                config_dir.join("trusted_peers.txt").display()
+            );
+        } else {
+            info!("TLS: {} trusted host fingerprint(s)", trusted.len());
+        }
+
+        Some(tls::make_acceptor(cert_chain, key, trusted).context("build TLS acceptor")?)
     } else {
         None
     };
@@ -250,16 +264,20 @@ async fn run_tcp_mode(
 ) -> Result<()> {
     let mut cursor_tracker = tracker::CursorTracker::new();
 
+    // Bind once and keep the socket for the whole run; only the accepted
+    // connection comes and goes.
+    let listener = std::sync::Arc::new(net::bind(addr, tls_acceptor.is_some()).await?);
+
     loop {
         let (tx, mut rx) = mpsc::unbounded_channel::<Event>();
         let (out_tx, out_rx) = mpsc::unbounded_channel::<Event>();
 
         let net_handle = {
-            let addr = addr.to_owned();
+            let listener = listener.clone();
             let acceptor = tls_acceptor.cloned();
             tokio::spawn(async move {
                 if let Err(e) =
-                    net::run_once(&addr, tx, out_rx, heartbeat_timeout_ms, clipboard_enabled, acceptor.as_ref())
+                    net::run_once(&listener, tx, out_rx, heartbeat_timeout_ms, clipboard_enabled, acceptor.as_ref())
                         .await
                 {
                     error!("net error: {e}");
