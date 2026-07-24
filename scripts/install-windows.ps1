@@ -1,4 +1,4 @@
-# Install yzendris-server on Windows 11.
+﻿# Install yzendris-server on Windows 11.
 # Run from the repo root: .\scripts\install-windows.ps1
 # Requires PowerShell 7+ and a compiled yzendris-server.exe.
 #

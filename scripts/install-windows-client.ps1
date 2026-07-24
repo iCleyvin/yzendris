@@ -1,4 +1,4 @@
-# Install yzendris-client on Windows (the laptop, when booted into Windows).
+﻿# Install yzendris-client on Windows (the laptop, when booted into Windows).
 # Run from the repo root: .\scripts\install-windows-client.ps1
 # Requires PowerShell 7+ and a compiled yzendris-client.exe.
 #

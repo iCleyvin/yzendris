@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   Instala yzendris-client.exe como aplicación UIAccess para que el mouse/teclado
   inyectado pueda tocar prompts de UAC y el Secure Desktop.
