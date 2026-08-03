@@ -14,6 +14,7 @@ pub async fn run(
     mut event_rx: mpsc::UnboundedReceiver<Event>,
     heartbeat_ms: u64,
     clipboard_enabled: bool,
+    max_file_bytes: u64,
     tls_connector: Option<tokio_rustls::TlsConnector>,
 ) -> Result<()> {
     let mut backoff_ms: u64 = 1000;
@@ -50,14 +51,14 @@ pub async fn run(
                             crate::hook::set_client_connected(client, true);
                             info!("[client {client}] connected to {addr} (TLS OK)");
                             let (reader, writer) = tokio::io::split(tls_stream);
-                            handle_generic(client, reader, writer, &mut event_rx, heartbeat_ms, clipboard_enabled).await
+                            handle_generic(client, reader, writer, &mut event_rx, heartbeat_ms, clipboard_enabled, max_file_bytes).await
                         }
                     }
                 } else {
                     crate::hook::set_client_connected(client, true);
                     info!("[client {client}] connected to {addr}");
                     let (reader, writer) = tokio::io::split(stream);
-                    handle_generic(client, reader, writer, &mut event_rx, heartbeat_ms, clipboard_enabled).await
+                    handle_generic(client, reader, writer, &mut event_rx, heartbeat_ms, clipboard_enabled, max_file_bytes).await
                 };
 
                 if let Err(e) = result {
@@ -81,6 +82,7 @@ async fn handle_generic<R, W>(
     event_rx: &mut mpsc::UnboundedReceiver<Event>,
     heartbeat_ms: u64,
     clipboard_enabled: bool,
+    max_file_bytes: u64,
 ) -> Result<()>
 where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
@@ -88,6 +90,13 @@ where
 {
     let heartbeat_interval = time::Duration::from_millis(heartbeat_ms);
     let mut heartbeat_tick = time::interval(heartbeat_interval);
+
+    // File transfer state (Windows→Linux out, Linux→Windows in). Both the
+    // sender's dedup signature and the receiver share this scope so a file we
+    // just received (and put on the clipboard) isn't streamed straight back.
+    let mut outgoing: Option<yzendris_filexfer::OutgoingBatch> = None;
+    let mut incoming: Option<yzendris_filexfer::IncomingBatch> = None;
+    let mut last_file_sig: Option<yzendris_filexfer::FileSig> = None;
 
     // Reads run in their own task: recv_event is NOT cancellation-safe, and
     // a select! arm that loses the race drops it mid-frame, desyncing the
@@ -137,10 +146,53 @@ where
                             break Err(e).context("send clipboard");
                         }
                     }
+                    // If the clipboard holds (new) files, start streaming them.
+                    if outgoing.is_none() {
+                        let paths = crate::clipboard::read_file_paths();
+                        if let Some(batch) = yzendris_filexfer::prepare_offer(
+                            &paths, &mut last_file_sig, max_file_bytes,
+                        ).await {
+                            let count = batch.count();
+                            info!("[client {client}] sending {count} file(s) → Linux");
+                            if let Err(e) = send_event(
+                                &mut writer, &Event::FileBatchStart { count },
+                            ).await {
+                                break Err(e).context("send file batch start");
+                            }
+                            outgoing = Some(batch);
+                        }
+                    }
                 }
 
                 if let Err(e) = send_event(&mut writer, &event).await {
                     break Err(e).context("send_event");
+                }
+            }
+
+            // File pump — active only while a transfer is in flight. The
+            // random-fair select interleaves file events with input and
+            // heartbeats so a large batch never starves the cursor stream.
+            ev = async { outgoing.as_mut().unwrap().next_event().await },
+                if outgoing.is_some() =>
+            {
+                match ev {
+                    Ok(Some(e)) => {
+                        if let Err(err) = send_event(&mut writer, &e).await {
+                            break Err(err).context("send file event");
+                        }
+                    }
+                    Ok(None) => {
+                        if let Err(e) = send_event(&mut writer, &Event::FileBatchEnd).await {
+                            break Err(e).context("send file batch end");
+                        }
+                        info!("[client {client}] file batch send complete");
+                        outgoing = None;
+                    }
+                    Err(e) => {
+                        warn!("[client {client}] file send error: {e} — ending batch");
+                        let _ = send_event(&mut writer, &Event::FileBatchEnd).await;
+                        outgoing = None;
+                    }
                 }
             }
 
@@ -161,6 +213,53 @@ where
                             crate::clipboard::write(&text);
                         }
                     }
+                    Some(Event::FileBatchStart { count }) => {
+                        incoming = None;
+                        if clipboard_enabled {
+                            match yzendris_filexfer::IncomingBatch::start().await {
+                                Ok(b) => {
+                                    info!("[client {client}] receiving {count} file(s) from Linux");
+                                    incoming = Some(b);
+                                }
+                                Err(e) => error!("[client {client}] can't start incoming batch: {e}"),
+                            }
+                        }
+                    }
+                    Some(Event::FileHeader { name, size }) => {
+                        if let Some(b) = incoming.as_mut() {
+                            if size > max_file_bytes {
+                                warn!("[client {client}] incoming file '{name}' is {size} bytes \
+                                       (over the {max_file_bytes} byte limit) — skipping");
+                            } else if let Err(e) = b.begin_file(&name, size).await {
+                                error!("[client {client}] can't create incoming file: {e}");
+                            }
+                        }
+                    }
+                    Some(Event::FileChunk { data }) => {
+                        if let Some(b) = incoming.as_mut() {
+                            if let Err(e) = b.write_chunk(&data).await {
+                                error!("[client {client}] write incoming chunk: {e}");
+                            }
+                        }
+                    }
+                    Some(Event::FileEnd { crc32 }) => {
+                        if let Some(b) = incoming.as_mut() {
+                            if let Err(e) = b.end_file(crc32).await {
+                                error!("[client {client}] finish incoming file: {e}");
+                            }
+                        }
+                    }
+                    Some(Event::FileBatchEnd) => {
+                        if let Some(b) = incoming.take() {
+                            let files = b.finish();
+                            if !files.is_empty() {
+                                info!("[client {client}] {} file(s) ready on clipboard", files.len());
+                                crate::clipboard::write_file_paths(&files);
+                                // Record them so crossing back doesn't stream them out again.
+                                last_file_sig = Some(yzendris_filexfer::signature_of(&files));
+                            }
+                        }
+                    }
                     Some(Event::EdgeReached { edge, frac }) => {
                         // Client cursor pushed past its screen edge — hand
                         // control back on the matching Windows side.
@@ -175,6 +274,11 @@ where
             }
         }
     };
+
+    // If a batch was interrupted mid-file, delete the dangling partial.
+    if let Some(mut b) = incoming {
+        b.discard_current();
+    }
 
     reader_task.abort();
     result

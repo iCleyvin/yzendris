@@ -4,7 +4,8 @@
 
 # Global settings.
 heartbeat_ms = 1000   # heartbeat interval; a client drops if it stops arriving
-clipboard    = true   # sync clipboard text on capture transitions
+clipboard    = true   # sync clipboard on capture transitions (text AND files, CRC-checked)
+max_file_mb  = 500    # max size per file moved via the clipboard; larger ones are skipped
 
 # ── Clients ───────────────────────────────────────────────────────────────────
 # One [[clients]] block per machine that receives the keyboard/mouse. Each has

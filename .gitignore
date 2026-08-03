@@ -1,6 +1,10 @@
 # Rust build artifacts
 /target/
 
-# Local TLS material and config generated at runtime — never commit these.
+# Backup / editor files
+*.swp
+*~
+
+# Local TLS material and runtime state (should live in the user config dir,
+# never in the repo)
 *.pem
-trusted_peers.txt

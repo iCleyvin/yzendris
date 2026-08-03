@@ -75,6 +75,16 @@ impl ClientPanel {
                 ui.checkbox(&mut self.cfg.clipboard, "");
                 ui.end_row();
 
+                if self.cfg.clipboard {
+                    ui.label("Tamaño máx. de archivo:");
+                    ui.add(
+                        egui::DragValue::new(&mut self.cfg.max_file_mb)
+                            .range(1..=100_000)
+                            .suffix(" MB"),
+                    );
+                    ui.end_row();
+                }
+
                 ui.label("TLS (cifrado + pairing):");
                 ui.checkbox(&mut self.cfg.tls, "");
                 ui.end_row();

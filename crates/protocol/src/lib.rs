@@ -42,6 +42,25 @@ pub enum Event {
     /// Client→Server: the client's screen resolution, sent once on connect so
     /// the host GUI can show it.
     ClientInfo { width: i32, height: i32 },
+    /// Begin a batch of `count` files, sent in the same direction and on the
+    /// same capture transition as `ClipboardText` when the clipboard holds
+    /// files instead of (or besides) text:
+    ///   Server→Client on CaptureStart  (Windows-copied files → Linux)
+    ///   Client→Server on CaptureEnd    (Linux-copied files → Windows)
+    /// Followed by `count` file sequences (`FileHeader` → `FileChunk`* →
+    /// `FileEnd`) and a final `FileBatchEnd`.
+    FileBatchStart { count: u32 },
+    /// Begin one file within the batch. `name` is the bare file name; `size`
+    /// is the total byte length.
+    FileHeader { name: String, size: u64 },
+    /// One in-order slice of the current file (≤ `FILE_CHUNK_BYTES`).
+    FileChunk { data: Vec<u8> },
+    /// End of the current file. `crc32` is the CRC-32 of the whole file so the
+    /// receiver can reject a corrupt or truncated transfer.
+    FileEnd { crc32: u32 },
+    /// End of the batch — the receiver puts every successfully-received file on
+    /// its local clipboard.
+    FileBatchEnd,
 }
 
 /// Edge encoding shared by `EnterAt` / `EdgeReached`.
@@ -63,6 +82,11 @@ const MAX_FRAME: u32 = 65536;
 /// drop the KVM link and force a reconnect. Cap it here instead, leaving
 /// headroom for bincode's enum discriminant and string length prefix.
 pub const MAX_CLIPBOARD_BYTES: usize = 60_000;
+
+/// Payload size of a single `FileChunk`. Kept well under `MAX_FRAME` so the
+/// framed event (bincode enum tag + `Vec<u8>` length prefix + data) always
+/// fits: 48 KiB of data leaves ~16 KiB of headroom.
+pub const FILE_CHUNK_BYTES: usize = 48 * 1024;
 
 impl Event {
     /// Build a `ClipboardText`, truncating oversized text at a UTF-8 character

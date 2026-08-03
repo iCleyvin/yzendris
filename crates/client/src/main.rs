@@ -51,6 +51,11 @@ struct Config {
     #[serde(default = "default_clipboard")]
     clipboard: bool,
 
+    /// Maximum size (MiB) of a single file transferred via the clipboard.
+    /// Files larger than this are skipped (both sending and receiving).
+    #[serde(default = "default_max_file_mb")]
+    max_file_mb: u64,
+
     /// Enable TLS. When true, generates a self-signed cert on first run and
     /// requires the server to have the fingerprint in trusted_peers.txt.
     #[serde(default)]
@@ -61,6 +66,7 @@ fn default_port() -> u16 { 7547 }
 fn default_bind() -> String { "0.0.0.0".to_owned() }
 fn default_heartbeat_timeout() -> u64 { 5000 }
 fn default_clipboard() -> bool { true }
+fn default_max_file_mb() -> u64 { 500 }
 
 impl Default for Config {
     fn default() -> Self {
@@ -70,6 +76,7 @@ impl Default for Config {
             kb_layout: String::new(),
             heartbeat_timeout_ms: default_heartbeat_timeout(),
             clipboard: default_clipboard(),
+            max_file_mb: default_max_file_mb(),
             tls: false,
         }
     }
@@ -222,6 +229,7 @@ async fn async_main() -> Result<()> {
             &addr,
             config.heartbeat_timeout_ms,
             config.clipboard,
+            config.max_file_mb.saturating_mul(1024 * 1024),
             tls_acceptor.as_ref(),
         )
         .await?;
@@ -260,6 +268,7 @@ async fn run_tcp_mode(
     addr: &str,
     heartbeat_timeout_ms: u64,
     clipboard_enabled: bool,
+    max_file_bytes: u64,
     tls_acceptor: Option<&tokio_rustls::TlsAcceptor>,
 ) -> Result<()> {
     let mut cursor_tracker = tracker::CursorTracker::new();
@@ -277,7 +286,7 @@ async fn run_tcp_mode(
             let acceptor = tls_acceptor.cloned();
             tokio::spawn(async move {
                 if let Err(e) =
-                    net::run_once(&listener, tx, out_rx, heartbeat_timeout_ms, clipboard_enabled, acceptor.as_ref())
+                    net::run_once(&listener, tx, out_rx, heartbeat_timeout_ms, clipboard_enabled, max_file_bytes, acceptor.as_ref())
                         .await
                 {
                     error!("net error: {e}");

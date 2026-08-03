@@ -80,6 +80,7 @@ pub fn save_role(role: Role) -> anyhow::Result<()> {
 pub struct ServerConfig {
     pub heartbeat_ms: u64,
     pub clipboard: bool,
+    pub max_file_mb: u64,
     pub clients: Vec<ClientEntry>,
 }
 
@@ -136,6 +137,7 @@ impl Default for ServerConfig {
         Self {
             heartbeat_ms: 1000,
             clipboard: true,
+            max_file_mb: 500,
             clients: vec![ClientEntry::default()],
         }
     }
@@ -146,6 +148,7 @@ impl Default for ServerConfig {
 struct ServerConfigPartial {
     heartbeat_ms: Option<u64>,
     clipboard: Option<bool>,
+    max_file_mb: Option<u64>,
     clients: Option<Vec<ClientEntry>>,
     // legacy single-client
     client_addr: Option<String>,
@@ -193,6 +196,7 @@ pub fn load_server_config() -> ServerConfig {
     ServerConfig {
         heartbeat_ms: p.heartbeat_ms.unwrap_or(default.heartbeat_ms),
         clipboard: p.clipboard.unwrap_or(default.clipboard),
+        max_file_mb: p.max_file_mb.unwrap_or(default.max_file_mb),
         clients,
     }
 }
@@ -212,6 +216,7 @@ pub struct ClientConfig {
     pub kb_layout: String,
     pub heartbeat_timeout_ms: u64,
     pub clipboard: bool,
+    pub max_file_mb: u64,
     pub tls: bool,
 }
 
@@ -223,6 +228,7 @@ impl Default for ClientConfig {
             kb_layout: String::new(),
             heartbeat_timeout_ms: 5000,
             clipboard: true,
+            max_file_mb: 500,
             tls: false,
         }
     }
@@ -235,6 +241,7 @@ struct ClientConfigPartial {
     kb_layout: Option<String>,
     heartbeat_timeout_ms: Option<u64>,
     clipboard: Option<bool>,
+    max_file_mb: Option<u64>,
     tls: Option<bool>,
 }
 
@@ -252,6 +259,7 @@ pub fn load_client_config() -> ClientConfig {
         kb_layout: p.kb_layout.unwrap_or(default.kb_layout),
         heartbeat_timeout_ms: p.heartbeat_timeout_ms.unwrap_or(default.heartbeat_timeout_ms),
         clipboard: p.clipboard.unwrap_or(default.clipboard),
+        max_file_mb: p.max_file_mb.unwrap_or(default.max_file_mb),
         tls: p.tls.unwrap_or(default.tls),
     }
 }

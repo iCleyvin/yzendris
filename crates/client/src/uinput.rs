@@ -129,7 +129,12 @@ impl VirtualKbdMouse {
             | Event::ClipboardText { .. }
             | Event::EnterAt { .. }
             | Event::EdgeReached { .. }
-            | Event::ClientInfo { .. } => {
+            | Event::ClientInfo { .. }
+            | Event::FileBatchStart { .. }
+            | Event::FileHeader { .. }
+            | Event::FileChunk { .. }
+            | Event::FileEnd { .. }
+            | Event::FileBatchEnd => {
                 return Ok(false);
             }
         };

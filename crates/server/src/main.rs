@@ -65,6 +65,11 @@ struct Config {
     #[serde(default = "default_clipboard")]
     clipboard: bool,
 
+    /// Maximum size (MiB) of a single file transferred via the clipboard.
+    /// Files larger than this are skipped (both sending and receiving).
+    #[serde(default = "default_max_file_mb")]
+    max_file_mb: u64,
+
     /// Enable TLS.  When true, the server verifies the Linux client's
     /// certificate fingerprint against `trusted_peers.txt`.
     #[serde(default)]
@@ -136,6 +141,8 @@ fn default_edge()        -> String { "right".to_owned() }
 fn default_heartbeat_ms()-> u64    { 1000 }
 #[cfg(windows)]
 fn default_clipboard()   -> bool   { true }
+#[cfg(windows)]
+fn default_max_file_mb() -> u64    { 500 }
 
 #[cfg(windows)]
 impl Default for Config {
@@ -146,6 +153,7 @@ impl Default for Config {
             edge:         default_edge(),
             heartbeat_ms: default_heartbeat_ms(),
             clipboard:    default_clipboard(),
+            max_file_mb:  default_max_file_mb(),
             tls:          false,
             layout:       None,
             clients:      Vec::new(),
@@ -293,8 +301,9 @@ async fn async_main() -> Result<()> {
         let connector = if c.tls { tls_connector.clone() } else { None };
         let heartbeat = config.heartbeat_ms;
         let clipboard = config.clipboard;
+        let max_file_bytes = config.max_file_mb.saturating_mul(1024 * 1024);
         handles.push(tokio::spawn(async move {
-            if let Err(e) = net::run(c.id, &c.addr, rx, heartbeat, clipboard, connector).await {
+            if let Err(e) = net::run(c.id, &c.addr, rx, heartbeat, clipboard, max_file_bytes, connector).await {
                 tracing::error!("client {} net task ended: {e}", c.id);
             }
         }));

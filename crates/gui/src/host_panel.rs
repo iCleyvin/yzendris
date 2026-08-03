@@ -202,6 +202,16 @@ impl HostPanel {
 
             ui.add_space(8.0);
             ui.checkbox(&mut self.cfg.clipboard, "Compartir portapapeles");
+            if self.cfg.clipboard {
+                ui.horizontal(|ui| {
+                    ui.label("Tamaño máx. de archivo:");
+                    ui.add(
+                        egui::DragValue::new(&mut self.cfg.max_file_mb)
+                            .range(1..=100_000)
+                            .suffix(" MB"),
+                    );
+                });
+            }
 
             // ── TLS pairing ─────────────────────────────────────────────────
             if self.any_tls() {

@@ -17,7 +17,17 @@ kb_layout = ""
 heartbeat_timeout_ms = 5000
 
 # Sync clipboard on capture transitions. Requires wl-clipboard on PATH.
+# Besides text, copied FILES are transferred too (one or many): copy files on
+# one machine, cross to the other, and paste. Each file is CRC-checked; a
+# corrupt or truncated transfer is discarded. Received files are written to
+# <temp>/yzendris (on Linux: /tmp/yzendris, pruned after 24h) and put on the
+# local clipboard. On Linux, paste-as-copy uses x-special/gnome-copied-files,
+# honoured by GTK file managers (Nautilus, Nemo, Thunar, Caja, PCManFM).
 clipboard = true
+
+# Maximum size (MiB) of a single file moved via the clipboard. Larger files are
+# skipped (protects the input link from being saturated). Default 500.
+max_file_mb = 500
 
 # TLS with SHA-256 fingerprint pinning, in BOTH directions. On first run with
 # tls=true a self-signed certificate is generated in ~/.config/yzendris/ and its

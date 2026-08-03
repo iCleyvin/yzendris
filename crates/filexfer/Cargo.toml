@@ -1,0 +1,11 @@
+[package]
+name    = "yzendris-filexfer"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+yzendris-protocol = { path = "../protocol" }
+tokio             = { workspace = true }
+anyhow            = { workspace = true }
+tracing           = { workspace = true }
+crc32fast         = "1"

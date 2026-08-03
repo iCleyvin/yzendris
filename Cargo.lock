@@ -3727,6 +3727,18 @@ dependencies = [
  "tracing-subscriber",
  "windows",
  "winresource",
+ "yzendris-filexfer",
+ "yzendris-protocol",
+]
+
+[[package]]
+name = "yzendris-filexfer"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "crc32fast",
+ "tokio",
+ "tracing",
  "yzendris-protocol",
 ]
 
@@ -3772,6 +3784,7 @@ dependencies = [
  "tracing-subscriber",
  "windows",
  "winresource",
+ "yzendris-filexfer",
  "yzendris-protocol",
 ]
 

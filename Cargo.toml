@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/protocol", "crates/server", "crates/client", "crates/gui"]
+members = ["crates/protocol", "crates/filexfer", "crates/server", "crates/client", "crates/gui"]
 resolver = "2"
 
 [workspace.dependencies]
