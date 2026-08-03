@@ -20,7 +20,7 @@ actually fire.
 - 👥 **Multiple clients at once** — share to several computers, each at its own
   spot.
 - ⌨️ Full keyboard incl. modifiers + WM shortcuts, all mouse buttons, scroll.
-- 📋 Two-way clipboard, 🔒 TLS with fingerprint pinning, ♻️ auto-reconnect.
+- 📋 Two-way clipboard — **text and files** — 🔒 TLS with fingerprint pinning, ♻️ auto-reconnect.
 - 🪟 **Graphical configurator** that installs and starts everything for you.
 
 If you've been stuck on
@@ -72,7 +72,13 @@ like a USB one plugged in. Modifiers work. Binds fire.
   the firewall, enables autostart). No terminal or config files required.
 - All keys including `Super` / `Ctrl` / `Alt` and combinations of them work.
 - Mouse buttons (L/M/R/side1/side2), scroll (vertical and horizontal).
-- Bidirectional clipboard sync on capture transitions.
+- Bidirectional clipboard sync on capture transitions — **text and files**.
+  Copy one or more files on one machine, cross the screen edge, and paste them
+  on the other. Each file is CRC-32 checked (corrupt/truncated transfers are
+  dropped); received files land in `<temp>/yzendris` and are placed on the local
+  clipboard. On Linux this uses `x-special/gnome-copied-files`, so GTK file
+  managers (Nautilus, Nemo, Thunar…) paste real copies with `Ctrl+V`. Cap the
+  per-file size with `max_file_mb` (default 500).
 - TLS with SHA-256 fingerprint pinning (enabled by default).
 - Auto-reconnect with exponential backoff.
 - Auto-detects the keyboard layout from `hyprctl devices` and applies it to the
@@ -87,7 +93,10 @@ like a USB one plugged in. Modifiers work. Binds fire.
   rely on your compositor's global keyboard config — global config DOES apply
   to the virtual device, so it usually just works).
 - No packaged installer — binaries plus install scripts.
-- No clipboard sync for binary/image clipboards — text only.
+- Clipboard sync covers text and files; raw image/other binary clipboard data
+  isn't synced. On Linux, file paste targets GTK managers
+  (`x-special/gnome-copied-files`); KDE/Dolphin's format isn't set yet (the files
+  still land in `<temp>/yzendris` regardless).
 - The Host role runs on Windows. The Client runs on Linux (uinput/Hyprland) **or
   Windows (SendInput)** — handy for a dual-boot laptop that sits between the
   monitors regardless of which OS it's in. The GUI runs on both.
@@ -187,7 +196,8 @@ so if you're missing one, start the pair and read the log.
 
 ```toml
 heartbeat_ms = 1000   # heartbeat interval (ms); a client drops at ~5× this
-clipboard    = true   # sync clipboard text
+clipboard    = true   # sync clipboard (text and files)
+max_file_mb  = 500    # max size per file moved via the clipboard; larger ones are skipped
 
 [[clients]]           # one block per client machine
 name = "laptop"
@@ -218,7 +228,8 @@ still read for backward compatibility.
 | `bind_addr`            | `"0.0.0.0"`    | Bind interface; tighten if you want |
 | `kb_layout`            | `""`           | Empty = auto-detect via `hyprctl` |
 | `heartbeat_timeout_ms` | `5000`         | Release all keys if no heartbeat for this long |
-| `clipboard`            | `true`         | Needs `wl-clipboard` |
+| `clipboard`            | `true`         | Sync text and files; needs `wl-clipboard` |
+| `max_file_mb`          | `500`          | Max size per file moved via the clipboard |
 | `tls`                  | `true`         | First run generates `cert.pem` + prints fingerprint |
 
 ## Security model — read this before exposing it on a hostile network
