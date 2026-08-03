@@ -209,7 +209,8 @@ async fn async_main() -> Result<()> {
         .map(|d| std::path::PathBuf::from(d).join("yzendris").join("server.log"));
 
     let filter = tracing_subscriber::EnvFilter::from_default_env()
-        .add_directive("yzendris_server=debug".parse().unwrap());
+        .add_directive("yzendris_server=debug".parse().unwrap())
+        .add_directive("yzendris_filexfer=debug".parse().unwrap());
 
     if let Some(ref path) = log_path {
         if let Some(parent) = path.parent() { let _ = std::fs::create_dir_all(parent); }

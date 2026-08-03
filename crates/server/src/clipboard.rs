@@ -138,6 +138,7 @@ unsafe fn read_file_inner() -> Vec<std::path::PathBuf> {
         buf.truncate(got as usize);
         paths.push(std::path::PathBuf::from(std::ffi::OsString::from_wide(&buf)));
     }
+    tracing::info!("read_file_paths (Windows): {} file(s) on clipboard (CF_HDROP)", paths.len());
     paths
 }
 
@@ -148,6 +149,7 @@ pub fn write_file_paths(paths: &[std::path::PathBuf]) {
     if paths.is_empty() {
         return;
     }
+    tracing::info!("write_file_paths (Windows): setting {} file(s) (CF_HDROP)", paths.len());
     unsafe { write_file_inner(paths) }
 }
 

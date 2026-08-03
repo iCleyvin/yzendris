@@ -46,17 +46,24 @@ mod imp {
     /// Every file currently on the clipboard, read from `text/uri-list` (the
     /// standard target that both GTK and Qt file managers set on copy).
     pub fn read_file_paths() -> Vec<std::path::PathBuf> {
-        let Ok(out) = Command::new("wl-paste")
+        let out = match Command::new("wl-paste")
             .arg("--type")
             .arg("text/uri-list")
             .output()
-        else {
-            return Vec::new();
+        {
+            Ok(o) => o,
+            Err(e) => {
+                tracing::warn!("read_file_paths: wl-paste failed to run: {e}");
+                return Vec::new();
+            }
         };
         if !out.status.success() {
+            // Non-zero is normal when the clipboard holds no uri-list at all.
+            tracing::debug!("read_file_paths: wl-paste exit {} (no uri-list)", out.status);
             return Vec::new();
         }
         let Ok(text) = String::from_utf8(out.stdout) else {
+            tracing::warn!("read_file_paths: uri-list is not valid UTF-8");
             return Vec::new();
         };
         let mut paths = Vec::new();
@@ -74,6 +81,7 @@ mod imp {
                 paths.push(std::path::PathBuf::from(percent_decode(path_part)));
             }
         }
+        tracing::info!("read_file_paths (Linux): {} file(s) on clipboard", paths.len());
         paths
     }
 
@@ -89,16 +97,30 @@ mod imp {
             payload.push('\n');
             payload.push_str(&path_to_uri(p));
         }
-        if let Ok(mut child) = Command::new("wl-copy")
+        tracing::info!(
+            "write_file_paths (Linux): setting {} file(s) via x-special/gnome-copied-files",
+            paths.len()
+        );
+        match Command::new("wl-copy")
             .arg("--type")
             .arg("x-special/gnome-copied-files")
             .stdin(Stdio::piped())
             .spawn()
         {
-            if let Some(stdin) = child.stdin.as_mut() {
-                let _ = stdin.write_all(payload.as_bytes());
+            Ok(mut child) => {
+                if let Some(stdin) = child.stdin.as_mut() {
+                    if let Err(e) = stdin.write_all(payload.as_bytes()) {
+                        tracing::warn!("write_file_paths: writing to wl-copy stdin failed: {e}");
+                    }
+                }
+                match child.wait() {
+                    Ok(status) => tracing::info!("write_file_paths: wl-copy exited {status}"),
+                    Err(e) => tracing::warn!("write_file_paths: wl-copy wait failed: {e}"),
+                }
             }
-            let _ = child.wait();
+            Err(e) => tracing::warn!(
+                "write_file_paths: wl-copy failed to run (is wl-clipboard installed?): {e}"
+            ),
         }
     }
 
@@ -257,6 +279,7 @@ mod imp {
             buf.truncate(got as usize);
             paths.push(PathBuf::from(OsString::from_wide(&buf)));
         }
+        tracing::info!("read_file_paths (Windows): {} file(s) on clipboard (CF_HDROP)", paths.len());
         paths
     }
 
@@ -264,6 +287,7 @@ mod imp {
         if paths.is_empty() {
             return;
         }
+        tracing::info!("write_file_paths (Windows): setting {} file(s) (CF_HDROP)", paths.len());
         unsafe { write_file_inner(paths) }
     }
 

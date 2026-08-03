@@ -133,7 +133,9 @@ fn main() {
 /// RUST_LOG wins when set; the info default applies when it's absent.
 fn build_filter() -> tracing_subscriber::EnvFilter {
     tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("yzendris_client=info"))
+        .unwrap_or_else(|_| {
+            tracing_subscriber::EnvFilter::new("yzendris_client=info,yzendris_filexfer=info")
+        })
 }
 
 /// Set up logging. On Windows there's no console (windows_subsystem="windows"),

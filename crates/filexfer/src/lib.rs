@@ -53,8 +53,10 @@ pub async fn prepare_offer(
     if paths.is_empty() {
         return None;
     }
+    tracing::info!("prepare_offer: {} file path(s) on clipboard", paths.len());
     let sig = signature_of(paths);
     if last_sig.as_ref() == Some(&sig) {
+        tracing::info!("prepare_offer: selection unchanged since last send — skipping");
         return None; // already handled this exact selection
     }
     *last_sig = Some(sig);
@@ -75,8 +77,10 @@ pub async fn prepare_offer(
         }
     }
     if keep.is_empty() {
+        tracing::info!("prepare_offer: no eligible files after filtering");
         return None;
     }
+    tracing::info!("prepare_offer: offering {} file(s)", keep.len());
     Some(OutgoingBatch::new(keep))
 }
 
