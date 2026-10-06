@@ -36,10 +36,63 @@ const MAX_PENDING: usize = 8;
 const SCREEN_REFRESH: Duration = Duration::from_secs(10);
 /// How long after input leaves a client its clipboard is accepted.
 const CLIPBOARD_WINDOW: Duration = Duration::from_secs(10);
+/// Slowest file transfer tolerated before it is abandoned (bytes per second).
+const MIN_TRANSFER_RATE: u64 = 1024 * 1024;
+
+/// Decides when a client may put something on the host's clipboard.
+///
+/// The permission belongs to one session, is opened only by the host taking
+/// input away from that client, and is spent by use: one text and one batch
+/// of files per hand-off. A file batch must also finish in reasonable time,
+/// so a client cannot hold one open and complete it — changing the host's
+/// clipboard — at a moment of its choosing.
+#[derive(Default)]
+struct ClipGate {
+    until: Option<Instant>,
+    text: bool,
+    files: bool,
+    batch_deadline: Option<Instant>,
+}
+
+impl ClipGate {
+    fn open(&mut self, now: Instant) {
+        self.until = Some(now + CLIPBOARD_WINDOW);
+        self.text = true;
+        self.files = true;
+    }
+
+    fn valid(&self, now: Instant) -> bool {
+        self.until.is_some_and(|until| now <= until)
+    }
+
+    fn take_text(&mut self, now: Instant) -> bool {
+        self.valid(now) && std::mem::take(&mut self.text)
+    }
+
+    fn take_files(&mut self, now: Instant, count: u32, total: u64, max_bytes: u64) -> bool {
+        self.batch_deadline = None;
+        if !self.valid(now) || !std::mem::take(&mut self.files) {
+            return false;
+        }
+        if total > u64::from(count).saturating_mul(max_bytes) {
+            return false;
+        }
+        let allowance = Duration::from_secs(60 + total / MIN_TRANSFER_RATE);
+        self.batch_deadline = Some(now + allowance);
+        true
+    }
+
+    fn batch_alive(&self, now: Instant) -> bool {
+        self.batch_deadline.is_some_and(|deadline| now <= deadline)
+    }
+}
 
 enum Nudge {
     /// Input just moved to this client: offer it our clipboard.
     OfferClipboard,
+    /// The host just took input away from this client: it may now hand over
+    /// its clipboard, once.
+    ExpectClipboard,
     /// Drop the connection.
     Kick,
 }
@@ -65,9 +118,6 @@ struct Core {
     /// The capture back-end holds a reference back to this struct, so it is
     /// taken out and dropped explicitly when the host stops.
     capture: Mutex<Option<Capture>>,
-    /// When input last left each client. A client may hand its clipboard to
-    /// the host only right after that, never at a moment of its choosing.
-    handoff: Mutex<HashMap<ClientId, Instant>>,
     locked: AtomicBool,
     serial: AtomicU64,
 }
@@ -115,8 +165,12 @@ impl Core {
                 }
             }
             Effect::Focus { from, to } => {
-                if let Some(id) = from {
-                    lock(&self.handoff).insert(id, Instant::now());
+                // Only a live session is told; a client that merely dropped
+                // its connection has no link left to receive this.
+                if let Some(link) =
+                    from.and_then(|id| lock(&self.links).get(&id).map(|l| l.nudges.clone()))
+                {
+                    let _ = link.send(Nudge::ExpectClipboard);
                 }
                 let name = to.and_then(|id| {
                     lock(&self.known)
@@ -132,12 +186,6 @@ impl Core {
                 }
             }
         }
-    }
-
-    fn clipboard_expected_from(&self, id: ClientId) -> bool {
-        lock(&self.handoff)
-            .get(&id)
-            .is_some_and(|left| left.elapsed() < CLIPBOARD_WINDOW)
     }
 
     fn id_of(&self, fp: &Fingerprint) -> Option<ClientId> {
@@ -242,7 +290,6 @@ pub async fn run(app: Arc<App>) -> Result<()> {
         links: Mutex::new(HashMap::new()),
         known: Mutex::new(Vec::new()),
         capture: Mutex::new(None),
-        handoff: Mutex::new(HashMap::new()),
         locked: AtomicBool::new(false),
         serial: AtomicU64::new(0),
     });
@@ -514,6 +561,7 @@ async fn session(
 
     let mut sync = ClipSync::default();
     let mut incoming: Option<Incoming> = None;
+    let mut gate = ClipGate::default();
     let mut ping = tokio::time::interval(PING_EVERY);
     let mut last_heard = Instant::now();
     let mut ping_sent: Option<(u32, Instant)> = None;
@@ -538,12 +586,22 @@ async fn session(
                         core.with(|sw| sw.client_screens(id, screens));
                     }
                     other => {
-                        let starts_transfer = matches!(other, Msg::ClipboardText(_) | Msg::FilesBegin { .. });
-                        if starts_transfer && !core.clipboard_expected_from(id) {
-                            // Unsolicited: the file frames that follow, if
-                            // any, find no open batch and are ignored too.
+                        let now = Instant::now();
+                        let allowed = match &other {
+                            Msg::ClipboardText(_) => gate.take_text(now),
+                            Msg::FilesBegin { count, total } => {
+                                let max = app.config().max_file_bytes();
+                                gate.take_files(now, *count, *total, max)
+                            }
+                            Msg::FileBegin { .. } | Msg::FileData(_) | Msg::FileEnd { .. } | Msg::FilesEnd => {
+                                incoming.is_some() && gate.batch_alive(now)
+                            }
+                            _ => true,
+                        };
+                        if !allowed {
+                            // Unsolicited, already used, or overdue: drop any
+                            // open batch so nothing of it reaches the clipboard.
                             incoming = None;
-                            tracing::debug!("ignored clipboard data a client sent unprompted");
                             continue;
                         }
                         if let Err(e) = receive_shared(app, &mut sync, &mut incoming, other).await {
@@ -555,6 +613,7 @@ async fn session(
             }
             nudge = nudge_rx.recv() => match nudge {
                 Some(Nudge::OfferClipboard) => offer_clipboard(app, &mut sync, &conn).await,
+                Some(Nudge::ExpectClipboard) => gate.open(Instant::now()),
                 Some(Nudge::Kick) | None => break,
             },
             _ = ping.tick() => {
@@ -657,4 +716,58 @@ pub async fn receive_shared(
         _ => {}
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MB: u64 = 1024 * 1024;
+
+    #[test]
+    fn clipboard_is_refused_until_the_host_hands_off() {
+        let now = Instant::now();
+        let mut gate = ClipGate::default();
+        assert!(!gate.take_text(now));
+        assert!(!gate.take_files(now, 1, 10, MB));
+        assert!(!gate.batch_alive(now));
+    }
+
+    #[test]
+    fn each_hand_off_allows_one_text_and_one_batch() {
+        let now = Instant::now();
+        let mut gate = ClipGate::default();
+        gate.open(now);
+        assert!(gate.take_text(now));
+        assert!(!gate.take_text(now), "a second text needs a new hand-off");
+        assert!(gate.take_files(now, 2, MB, MB));
+        assert!(!gate.take_files(now, 2, MB, MB));
+        assert!(
+            !gate.batch_alive(now),
+            "a refused batch leaves nothing open"
+        );
+    }
+
+    #[test]
+    fn the_window_expires() {
+        let now = Instant::now();
+        let mut gate = ClipGate::default();
+        gate.open(now);
+        let late = now + CLIPBOARD_WINDOW + Duration::from_secs(1);
+        assert!(!gate.take_text(late));
+        assert!(!gate.take_files(late, 1, 1, MB));
+    }
+
+    #[test]
+    fn a_batch_cannot_be_held_open() {
+        let now = Instant::now();
+        let mut gate = ClipGate::default();
+        gate.open(now);
+        assert!(gate.take_files(now, 1, 100 * MB, 500 * MB));
+        assert!(gate.batch_alive(now + Duration::from_secs(150)));
+        assert!(!gate.batch_alive(now + Duration::from_secs(161)));
+        // A batch claiming more than the limits allow is refused outright.
+        gate.open(now);
+        assert!(!gate.take_files(now, 1, 501 * MB, 500 * MB));
+    }
 }
