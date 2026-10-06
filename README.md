@@ -1,333 +1,168 @@
-# Yzendris — share one keyboard and mouse across Windows and Linux
+<p align="center"><img src="assets/icon.png" width="96" alt=""></p>
+<h1 align="center">Yzendris</h1>
+<p align="center">One keyboard and mouse for all your computers.<br>
+Push the cursor past the edge of one screen and keep working on the next machine.</p>
+<p align="center"><a href="README.es.md">Español</a></p>
 
-**Yzendris is a lightweight, open-source software KVM**: control several
-computers from a single keyboard and mouse, moving the cursor between their
-screens over your LAN. The host runs on **Windows**; clients run on **Linux
-(Wayland / Hyprland)** or **Windows**. Written in Rust, encrypted with TLS,
-configured entirely from a graphical app — no terminal required.
+![The host's arrangement view](docs/img/host.png)
 
-It's an alternative to **Synergy, Barrier, Input Leap, Deskflow and Mouse
-Without Borders** with one thing they get wrong on modern Linux: it correctly
-delivers modifier keys (`Super`, `Ctrl`, `Alt`) to **Wayland compositors like
-Hyprland**, so window-manager shortcuts (`Super+Q`, `Super+1`, `Ctrl+Alt+T`)
-actually fire.
+Yzendris is a free, open-source software KVM for Windows and Linux. The
+computer that owns the keyboard and mouse is the **host**; the others are
+**clients**. Any mix works — Linux → Linux, Windows → Linux, Linux → Windows.
 
-**Highlights**
-
-- 🖱️ Move the cursor between machines by crossing a screen edge — and back.
-- 🧩 Any monitor arrangement: a laptop **between two monitors** (side by side or
-  stacked), or at an outer edge. Works in 2D.
-- 👥 **Multiple clients at once** — share to several computers, each at its own
-  spot.
-- ⌨️ Full keyboard incl. modifiers + WM shortcuts, all mouse buttons, scroll.
-- 📋 Two-way clipboard — **text and files** — 🔒 TLS with fingerprint pinning, ♻️ auto-reconnect.
-- 🪟 **Graphical configurator** that installs and starts everything for you.
-
-If you've been stuck on
-[feschber/lan-mouse#446](https://github.com/feschber/lan-mouse/issues/446)
-or fighting with Deskflow / Input Leap / Synergy because your `Super+Q` and
-`Ctrl+T` never reach your Linux side — this is for you.
-
-## Why it exists
-
-I run a Windows desktop with the physical keyboard and mouse, and a laptop
-sitting next to it running Hyprland. I wanted the laptop to be just "the
-screen on the right" — move the cursor over and start typing.
-
-Every existing tool failed the same way: cursor crossed fine, regular keys
-worked, but **the modifiers never reached Hyprland's bind system**. Turns out
-they all forward input through Wayland's `libei`, which goes through the
-`org.freedesktop.portal.RemoteDesktop` portal, which `xdg-desktop-portal-hyprland`
-does not implement at the time of writing.
-
-Yzendris skips Wayland entirely on the client side:
-
-```
-Windows host                              Linux client
-─────────────                             ─────────────
-LowLevelKeyboardHook ─┐                   TCP listener
-LowLevelMouseHook    ─┤── TCP + TLS ──→   /dev/uinput  (kernel)
-edge detection         (bincode framed)     └─→ libinput → compositor
-capture state                               hyprctl keyword (apply layout)
-```
-
-`/dev/uinput` is kernel-level. The compositor sees a virtual keyboard exactly
-like a USB one plugged in. Modifiers work. Binds fire.
-
-## What it currently does
-
-- Mouse cursor crosses by hitting a configured screen edge (default: right),
-  and **crosses back** when you push the matching edge of the client screen —
-  no key combo needed (the combo `Ctrl+Shift+Alt` still works as an escape).
-- **Any monitor arrangement**: place a client between any two adjacent
-  monitors — **side by side** *or* **stacked** (one above the other, crossing by
-  the top/bottom edge) — or at an outer edge. PC screen 1 → laptop → PC screen 2,
-  seamlessly in both directions.
-- **Multiple clients at once**: the host can share to several machines
-  simultaneously, each at its own boundary/edge (`[[clients]]`).
-- **Graphical configurator is the main path** (`yzendris-gui`): one app for both
-  machines — on first run it asks whether the machine is the Host or a Client,
-  detects your monitors, lets you add clients and place each one, manages TLS
-  pairing, and with one click **installs everything** (copies the program, opens
-  the firewall, enables autostart). No terminal or config files required.
-- All keys including `Super` / `Ctrl` / `Alt` and combinations of them work.
-- Mouse buttons (L/M/R/side1/side2), scroll (vertical and horizontal).
-- Bidirectional clipboard sync on capture transitions — **text and files**.
-  Copy one or more files on one machine, cross the screen edge, and paste them
-  on the other. Each file is CRC-32 checked (corrupt/truncated transfers are
-  dropped); received files land in `<temp>/yzendris` and are placed on the local
-  clipboard. On Linux this uses `x-special/gnome-copied-files`, so GTK file
-  managers (Nautilus, Nemo, Thunar…) paste real copies with `Ctrl+V`. Cap the
-  per-file size with `max_file_mb` (default 500).
-- TLS with SHA-256 fingerprint pinning (enabled by default).
-- Auto-reconnect with exponential backoff.
-- Auto-detects the keyboard layout from `hyprctl devices` and applies it to the
-  virtual device (without this step, Hyprland doesn't recognise modifiers — see
-  the long comment in `crates/client/src/hyprland.rs`).
-- systemd user unit on Linux, startup shortcut on Windows.
-
-## What it doesn't do (yet)
-
-- Hyprland-specific runtime layout assignment. On Sway/Niri/river the install
-  works but you might need to set `kb_layout` manually in `client.toml` (or
-  rely on your compositor's global keyboard config — global config DOES apply
-  to the virtual device, so it usually just works).
-- No packaged installer — binaries plus install scripts.
-- Clipboard sync covers text and files; raw image/other binary clipboard data
-  isn't synced. On Linux, file paste targets GTK managers
-  (`x-special/gnome-copied-files`); KDE/Dolphin's format isn't set yet (the files
-  still land in `<temp>/yzendris` regardless).
-- The Host role runs on Windows. The Client runs on Linux (uinput/Hyprland) **or
-  Windows (SendInput)** — handy for a dual-boot laptop that sits between the
-  monitors regardless of which OS it's in. The GUI runs on both.
-
-## Requirements
-
-| Side    | Needs                                                                 |
-| ------- | --------------------------------------------------------------------- |
-| Windows | Rust toolchain (stable) to build, PowerShell 5+ for the install script |
-| Linux   | Rust toolchain (stable), user in the `input` group (`usermod -aG input $USER`), Hyprland (or any wlroots compositor), `wl-clipboard` if you want clipboard sync |
-
-Tested daily on Hyprland 0.55.x with Omarchy on CachyOS, talking to Windows 11.
+- **Works on any Linux desktop.** Input goes through the kernel (`uinput` /
+  `evdev`), not through one display server, so GNOME, KDE Plasma, Hyprland,
+  Sway, COSMIC and X11 all behave the same — including window-manager
+  shortcuts like `Super+Q`, which portal-based tools often cannot deliver.
+- **Pair with a six-digit code.** No IP addresses to type, no fingerprints to
+  copy. Clients find the host on your network by themselves.
+- **Encrypted and mutually authenticated.** TLS 1.3 with pinned identities in
+  both directions. See the [security model](docs/SECURITY.md).
+- **Clipboard that follows you** — text and copied files.
+- **Light.** One small service: about 6 MB of memory and no measurable CPU
+  while idle.
+- **A real app.** Arrange your screens by dragging them; English and Spanish;
+  light and dark.
 
 ## Install
 
-### 1. Build
+### Linux — Ubuntu, Fedora, Bazzite, Arch, CachyOS, Omarchy…
 
-You need a stable [Rust toolchain](https://rustup.rs). Build the three binaries
-(`yzendris-server`, `yzendris-client`, `yzendris-gui`) on each machine for its OS:
-
-```bash
-# On the Windows host
-cargo build --release -p yzendris-server -p yzendris-gui
-
-# On a client (Linux or Windows)
-cargo build --release -p yzendris-client -p yzendris-gui
+```sh
+curl -fsSL https://raw.githubusercontent.com/iCleyvin/yzendris/main/scripts/install.sh | sh
 ```
 
-The compiled programs land in `target/release/`.
+Everything is installed for your user only (`~/.local/bin`, a systemd *user*
+service). You are asked for your password once, to add a udev rule that lets
+you — the person at the computer — create virtual input devices. On immutable
+systems such as Bazzite nothing is layered and no reboot is needed.
 
-### 2. Set up — the easy way (GUI, recommended)
+### Windows 10 / 11
 
-Run **`yzendris-gui`** on each machine and follow it:
-
-1. **Pick a role** — *Host* (the PC with the physical keyboard/mouse) or
-   *Cliente* (a machine that receives them).
-2. **Host panel:** add each client (name + LAN IP), choose **where it sits**
-   from the dropdown (between two monitors, or an outer edge), and tick *TLS*.
-   **Client panel:** set the listen port (default 7547); leave *TLS* on.
-3. Click **⚙ Instalar y habilitar inicio automático** on each machine. With one
-   administrator prompt it copies the program, opens the firewall and enables
-   autostart — nothing else to do by hand.
-4. **Pair TLS once, both ways:** each panel shows that machine's own
-   fingerprint (`sha256:…`) and has a *Huellas TLS confiables* box. Paste the
-   client's fingerprint into the host, and the host's fingerprint into the
-   client. Pinning is mutual, so both directions are required. (Skip if you set
-   `tls = false`.)
-5. Press **▶ Iniciar** on both. The top of the host panel shows
-   *“Servidor en ejecución”* and a green dot per connected client.
-
-That's it — move the cursor across the edge and you're on the other machine.
-Push the client screen's edge facing the PC to come back; `Ctrl+Shift+Alt`
-always brings control home.
-
-### 2-alt. Set up — scripts (no GUI)
-
-```bash
-# Linux client (run inside the Wayland session)
-./scripts/install-linux.sh
-```
 ```powershell
-# Windows host (PowerShell as Administrator)
-.\scripts\install-windows.ps1
-# Windows client (a laptop booted into Windows)
-.\scripts\install-windows-client.ps1
+irm https://raw.githubusercontent.com/iCleyvin/yzendris/main/scripts/install.ps1 | iex
 ```
 
-These copy the binary to the per-user dir, write a default config, open the
-firewall (outbound on the host, inbound on a client) and set up autostart
-(systemd user unit on Linux, Startup shortcut / scheduled task on Windows).
-Then edit the config (see the reference below) and pair TLS as in step 4.
+No administrator rights needed. If this PC is the host you get one optional
+prompt to add a firewall rule.
 
-### Manual pairing reference
+Prefer not to pipe a script? Download the archive from
+[Releases](https://github.com/iCleyvin/yzendris/releases), unpack it, and run
+`yzendris install` from that folder. It is the same thing.
 
-Both roles generate a self-signed certificate on first run with `tls = true`
-and log its SHA-256 fingerprint:
+## Set up — two minutes
 
-```bash
-# Linux client
-journalctl --user -u yzendris-client -e   # → "TLS fingerprint: sha256:aa:bb:…"
-# Windows: see %APPDATA%\yzendris\server.log / client.log, or the GUI panels
+1. Open **Yzendris** on the computer with the keyboard and mouse and choose
+   *This one has the keyboard and mouse*. Press **Add device**: it shows a
+   code.
+
+   ![Pairing](docs/img/pairing.png)
+
+2. Open **Yzendris** on the other computer, choose *This one is controlled
+   from another*, and type the code.
+3. Back on the host, drag the new device to the side of the monitor where it
+   physically sits.
+
+That's it. Move the cursor through that edge.
+
+Without the app, the same in a terminal:
+
+```sh
+yzendris role host && yzendris pair      # on the host → prints a code
+yzendris join 123456                     # on the client
 ```
 
-Each side keeps a `trusted_peers.txt` in its config dir (`%APPDATA%\yzendris\`
-on Windows, `~/.config/yzendris/` on Linux) holding the *other* side's
-fingerprints, one per line, `#` comments allowed:
+## Using it
 
-- host's `trusted_peers.txt` → every client's fingerprint
-- each client's `trusted_peers.txt` → the host's fingerprint
+| | |
+|---|---|
+| Cross to another computer | push the cursor through the screen edge |
+| `Ctrl+Shift+Alt` (tap) | bring input back to the host |
+| `Ctrl+Shift+Alt` + `←` `→` | previous / next computer |
+| `Ctrl+Shift+Alt` + `1`–`9`, `0` | jump to a computer / back to the host |
+| `Ctrl+Shift+Alt` + `L` | lock the pointer to the current computer (for games) |
 
-Restart both after editing. A rejected handshake logs the fingerprint it saw,
-so if you're missing one, start the pair and read the log.
+Copy on one computer, cross over, paste on the other. Copied files travel too
+(up to 500 MB each by default) and are never opened, only made available to
+paste.
 
-## Configuration reference
+A client can sit **between two host monitors**: attach it to the edge they
+share and the cursor passes through it on the way from one to the other.
 
-### `server.toml` (host) — the GUI writes this for you
+## What works where
 
-```toml
-heartbeat_ms = 1000   # heartbeat interval (ms); a client drops at ~5× this
-clipboard    = true   # sync clipboard (text and files)
-max_file_mb  = 500    # max size per file moved via the clipboard; larger ones are skipped
+| | Client (is controlled) | Host (shares its input) |
+|---|---|---|
+| **Linux, any desktop** | ✅ | ✅ keyboard shortcuts everywhere; screen edges on Hyprland and X11 |
+| **Windows 10/11** | ✅ | ✅ |
+| macOS | not yet | not yet |
 
-[[clients]]           # one block per client machine
-name = "laptop"
-addr = "192.168.1.42" # the client's LAN IP
-port = 7547
-tls  = true
-between = ["DISPLAY1", "DISPLAY2"]   # placement: between these two monitors
-# edge = "right"                     # …or an outer edge: right/left/top/bottom
-```
+Two things worth knowing:
 
-| Field (per `[[clients]]`) | Notes |
-| ------------------------- | ----- |
-| `name`                    | Friendly label shown in logs/GUI |
-| `addr` / `port`           | The client's LAN address and listen port |
-| `tls`                     | Verify the client's cert fingerprint (keep on) |
-| `between = ["A", "B"]`    | Laptop sits between monitors A and B (device names like `DISPLAY1`). Side-by-side or stacked is auto-detected. |
-| `edge`                    | Or place it past an outer edge: `right`/`left`/`top`/`bottom` |
+- **Linux host on GNOME or KDE Wayland:** Wayland does not let programs see
+  where the cursor is, so a host there cannot notice the cursor reaching an
+  edge. Switching works with the shortcuts above; the app tells you when this
+  applies. As a *client*, every desktop works fully.
+- **Windows and elevated windows:** Windows does not let a normal program type
+  into administrator windows or UAC prompts. See [docs/WINDOWS.md](docs/WINDOWS.md).
 
-Add more `[[clients]]` blocks to share to several machines at once. The legacy
-single-client form (top-level `client_addr`/`port`/`edge`/`tls` + `[layout]`) is
-still read for backward compatibility.
+### How well tested is 0.2?
 
-### `client.toml` (Linux or Windows)
+Being straight about it: this release is a ground-up rewrite.
 
-| Field                  | Default        | Notes |
-| ---------------------- | -------------- | ----- |
-| `port`                 | `7547`         | Listen port |
-| `bind_addr`            | `"0.0.0.0"`    | Bind interface; tighten if you want |
-| `kb_layout`            | `""`           | Empty = auto-detect via `hyprctl` |
-| `heartbeat_timeout_ms` | `5000`         | Release all keys if no heartbeat for this long |
-| `clipboard`            | `true`         | Sync text and files; needs `wl-clipboard` |
-| `max_file_mb`          | `500`          | Max size per file moved via the clipboard |
-| `tls`                  | `true`         | First run generates `cert.pem` + prints fingerprint |
+- The switching logic, protocol, pairing and file transfer are covered by
+  automated tests, including an end-to-end test on real kernel input devices.
+- Linux host and client are verified end to end on Ubuntu 24.04 (X11).
+- The Windows build is verified to start, pair and hold a session; its input
+  hooks and injection, and Linux under Wayland compositors, follow well-known
+  mechanisms but have had little real-world mileage yet.
 
-## Security model — read this before exposing it on a hostile network
-
-- All keystrokes go over the wire. **Always run with `tls = true`.** Without
-  TLS, anyone on your LAN with `tcpdump` can keylog you — and anyone at all can
-  connect to the client's port and type on your machine.
-- Pinning is **mutual**: each side has its own self-signed cert and a
-  `trusted_peers.txt` listing the SHA-256 fingerprint of the other. The host
-  checks the client's; the client checks the host's. Both are fail-closed — an
-  empty `trusted_peers.txt` rejects every connection, and the rejected
-  handshake logs the fingerprint you need to paste in. There's no PKI / CA
-  chain. If your machine is compromised enough to swap `trusted_peers.txt`, an
-  attacker can MITM the next connection — but at that point they already own
-  you.
-- Client-side pinning is what stops a stranger on the same LAN from connecting
-  to port 7547 and injecting keystrokes through `/dev/uinput`. On a network you
-  don't control (office, campus, café), also restrict the port to the host's
-  address: `sudo ufw allow from <host-ip> to any port 7547 proto tcp`.
-- The Linux side runs as your user, not as root. It uses `/dev/uinput` via
-  the `input` group. No setuid binaries.
-- Designed for trusted LANs. **Don't expose port 7547 to the internet.** If
-  you really need cross-network operation, tunnel through Tailscale / WireGuard
-  / ssh.
+If something misbehaves on your setup, `yzendris doctor` and the **Activity**
+tab say why — please open an issue with that output.
 
 ## Troubleshooting
 
-**Mouse crosses but keys don't reach Hyprland binds**
+Run `yzendris doctor`. The usual suspects:
 
-Check the kb_layout was applied:
-```bash
-hyprctl devices | grep -A 5 yzendris-virtual-kb
-```
-You should see a non-empty `l "..."` (layout). If it's empty, your compositor
-isn't Hyprland and runtime layout assignment didn't apply — set `kb_layout`
-explicitly in `client.toml`.
+- **“not allowed to create its virtual keyboard”** — press *Grant access* in
+  the app, or run `yzendris install`.
+- **The client never finds the host** — both must be on the same network.
+  Type the host's address (shown under the pairing code) instead; if that
+  fails, the host's firewall is blocking TCP 7547.
+- **Shortcuts like `Super` do nothing on a Hyprland client** — set
+  `keyboard_layout = "us"` (your layout) under `[client]` in the config.
+- **Cursor too fast or slow on the other computer** — *Settings → Pointer
+  speed on other computers*.
 
-**Connection refused / timeout**
+Uninstall with `yzendris uninstall`.
 
-UFW or another firewall blocking TCP 7547. The install script tries to handle
-this on Ubuntu/Debian/Arch (`ufw`), but other distros vary:
-```bash
-sudo ufw allow 7547/tcp
-# or: sudo firewall-cmd --permanent --add-port=7547/tcp && sudo firewall-cmd --reload
-```
+## Build from source
 
-**"untrusted server fingerprint" on the Windows side**
+Needs a stable [Rust toolchain](https://rustup.rs) (1.85+) and nothing else.
 
-You haven't pasted the Linux client's fingerprint into `trusted_peers.txt`
-yet, or the cert was regenerated. Get the current one:
-```bash
-journalctl --user -u yzendris-client | grep fingerprint | tail -1
+```sh
+git clone https://github.com/iCleyvin/yzendris && cd yzendris
+cargo build --release
+./target/release/yzendris install
 ```
 
-**Stuck modifier after a disconnect**
+`yzendris-gui --demo host` shows the interface with sample data — no second
+computer required. [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) explains how
+the pieces fit and how to add support for another platform.
 
-The client releases all keys on heartbeat timeout (default 5s) and on
-`CaptureEnd`. If you somehow end up with a stuck Super:
-```bash
-systemctl --user restart yzendris-client
-```
+## Upgrading from 0.1
 
-## Contributing
+0.2 pairs with a code instead of hand-copied fingerprints, and clients now
+connect to the host rather than the other way round. Old `server.toml` /
+`client.toml` files are not read: install 0.2 on both machines and pair once.
 
-This is a personal project I maintain in my spare time. I'll respond to issues
-and review PRs, but expect days, not hours.
+## Alternatives
 
-If you're filing a bug:
-- Include `journalctl --user -u yzendris-client -e` from the Linux side.
-- Include the contents of `%LOCALAPPDATA%\yzendris\server.err.log` from Windows.
-- Tell me your compositor and version (`hyprctl version`).
-
-If you're sending a PR, please make it focused — one logical change at a time.
-
-## Related projects & alternatives
-
-Yzendris is a software KVM in the same space as these — it focuses on getting
-Wayland modifier keys right and on a no-terminal graphical setup:
-
-- [feschber/lan-mouse](https://github.com/feschber/lan-mouse) — tried first;
-  great Linux-to-Linux. The Wayland portal limitation is upstream.
-- [deskflow/deskflow](https://github.com/deskflow/deskflow) — the Synergy fork;
-  same Wayland modifier limitation today.
-- [Synergy](https://symless.com/synergy) /
-  [Input Leap](https://github.com/input-leap/input-leap) — the classics.
-- [Microsoft Mouse Without Borders](https://github.com/microsoft/PowerToys) —
-  Windows-to-Windows only.
-- [htrefil/rkvm](https://github.com/htrefil/rkvm) — Linux-only; its uinput
-  approach inspired Yzendris's client side.
+[Deskflow](https://github.com/deskflow/deskflow) / Synergy / Input Leap,
+[lan-mouse](https://github.com/feschber/lan-mouse),
+[rkvm](https://github.com/htrefil/rkvm) (whose kernel-level approach inspired
+this), and Mouse Without Borders in PowerToys are all worth a look.
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
-
----
-
-<sub>**Keywords:** software KVM · share keyboard and mouse between computers ·
-mouse and keyboard sharing over LAN · Windows ↔ Linux KVM · Wayland / Hyprland
-keyboard sharing · multi-monitor cursor sharing · open-source Synergy / Barrier
-/ Input Leap / Deskflow / Mouse Without Borders alternative · KVM software for
-Windows and Linux · move mouse between screens · Rust.</sub>
+[MIT](LICENSE). The bundled Geist typeface is under the SIL Open Font License.
