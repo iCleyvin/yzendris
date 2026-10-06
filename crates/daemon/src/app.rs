@@ -163,7 +163,7 @@ impl App {
     pub fn pairing_code(&self) -> Option<String> {
         let mut live = self.live();
         match &live.pairing {
-            Some(w) if w.deadline > Instant::now() && w.attempts_left > 0 => Some(w.code.clone()),
+            Some(w) if w.deadline > Instant::now() => Some(w.code.clone()),
             Some(_) => {
                 live.pairing = None;
                 None
@@ -172,15 +172,28 @@ impl App {
         }
     }
 
-    /// Record a failed attempt; the window closes once they run out.
+    /// Spend one pairing attempt and return the code to check it against.
+    ///
+    /// The attempt is counted *before* the exchange runs. Counting failures
+    /// afterwards would let several connections opened at once each try a
+    /// code before any of them had been recorded.
+    pub fn take_pairing_attempt(&self) -> Option<String> {
+        let mut live = self.live();
+        let window = live.pairing.as_mut()?;
+        if window.deadline <= Instant::now() || window.attempts_left == 0 {
+            live.pairing = None;
+            return None;
+        }
+        window.attempts_left -= 1;
+        Some(window.code.clone())
+    }
+
+    /// Close the window once its last attempt has failed.
     pub fn pairing_failed(&self) {
         let mut live = self.live();
-        if let Some(w) = live.pairing.as_mut() {
-            w.attempts_left = w.attempts_left.saturating_sub(1);
-            if w.attempts_left == 0 {
-                live.pairing = None;
-                tracing::warn!("pairing closed after too many wrong codes");
-            }
+        if live.pairing.as_ref().is_some_and(|w| w.attempts_left == 0) {
+            live.pairing = None;
+            tracing::warn!("pairing closed after too many wrong codes");
         }
     }
 

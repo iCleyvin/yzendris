@@ -284,8 +284,39 @@ fn free_path(dir: &Path, name: &str) -> PathBuf {
         .unwrap_or(first)
 }
 
+/// Is `name` one Windows would open as a device rather than a file?
+///
+/// Windows decides this from the part before the *first* dot, ignoring
+/// trailing spaces, so `NUL`, `nul.txt`, `NUL .txt` and `COM1.tar.gz` are all
+/// devices. `COM`/`LPT` also accept the superscript digits ¹ ² ³.
+fn is_windows_device(name: &str) -> bool {
+    let stem = name
+        .split('.')
+        .next()
+        .unwrap_or("")
+        .trim_end_matches(' ')
+        .to_uppercase();
+    if matches!(
+        stem.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) {
+        return true;
+    }
+    let mut chars = stem.chars();
+    let prefix: String = chars.by_ref().take(3).collect();
+    matches!(prefix.as_str(), "COM" | "LPT")
+        && matches!((chars.next(), chars.next()), (Some(d), None) if d.is_ascii_digit() || "¹²³".contains(d))
+}
+
+/// Strip what Windows silently drops from the end of a name.
+fn trim_tail(name: &mut String) {
+    name.truncate(name.trim_end_matches(['.', ' ']).len());
+}
+
 /// Reduce a peer-supplied name to a bare file name that is safe on every
-/// supported file system.
+/// supported file system. The result is checked the way the *strictest*
+/// system interprets it, so a name that is harmless where it was sent from
+/// cannot turn into something else where it lands.
 pub fn safe_name(raw: &str) -> String {
     let base = raw.rsplit(['/', '\\']).next().unwrap_or(raw);
     let mut name: String = base
@@ -296,19 +327,8 @@ pub fn safe_name(raw: &str) -> String {
             c => c,
         })
         .collect();
-    // Windows silently strips trailing dots and spaces; do it explicitly.
-    name.truncate(name.trim_end_matches(['.', ' ']).len());
-    let name = name.trim_start().to_owned();
-    if name.is_empty() || name.chars().all(|c| c == '.') {
-        return "file".into();
-    }
-    // CON, NUL, COM1… are devices on Windows whatever their extension.
-    let stem = name.split('.').next().unwrap_or("").to_ascii_uppercase();
-    let reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
-        || (stem.len() == 4
-            && (stem.starts_with("COM") || stem.starts_with("LPT"))
-            && stem.as_bytes()[3].is_ascii_digit());
-    let mut name = if reserved { format!("_{name}") } else { name };
+    trim_tail(&mut name);
+    let mut name = name.trim_start().to_owned();
     if name.len() > MAX_NAME_BYTES {
         let ext = name
             .rfind('.')
@@ -321,6 +341,15 @@ pub fn safe_name(raw: &str) -> String {
         }
         name.truncate(cut);
         name.push_str(&ext);
+        // Cutting can expose a new trailing dot or space.
+        trim_tail(&mut name);
+    }
+    if name.is_empty() {
+        return "file".into();
+    }
+    // Checked last, on the final name, so no earlier step can re-create one.
+    if is_windows_device(&name) {
+        name.insert(0, '_');
     }
     name
 }
@@ -466,6 +495,15 @@ mod tests {
         assert_eq!(safe_name("nul.txt"), "_nul.txt");
         assert_eq!(safe_name("COM7"), "_COM7");
         assert_eq!(safe_name("comet.txt"), "comet.txt");
+        // Forms Windows also resolves to a device.
+        assert_eq!(safe_name("NUL .txt"), "_NUL .txt");
+        assert_eq!(safe_name("com1.tar.gz"), "_com1.tar.gz");
+        assert_eq!(safe_name("LPT².log"), "_LPT².log");
+        assert_eq!(safe_name("conin$"), "_conin$");
+        assert_eq!(safe_name("aux."), "_aux");
+        assert_eq!(safe_name("COM10.txt"), "COM10.txt");
+        assert_eq!(safe_name("console.log"), "console.log");
+        assert_eq!(safe_name(" . "), "file");
         assert_eq!(safe_name("tab\there"), "tab_here");
         let long = safe_name(&format!("{}.tar.gz", "ñ".repeat(400)));
         assert!(long.len() <= MAX_NAME_BYTES && long.ends_with(".gz"));

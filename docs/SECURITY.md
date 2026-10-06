@@ -77,9 +77,20 @@ firewall rule.
 ## Local control interface
 
 The app and CLI talk to the service over a Unix socket in `$XDG_RUNTIME_DIR`
-(mode 0600, and the peer's uid is verified) or, on Windows, a named pipe that
-rejects remote clients. Other users on the same Windows machine cannot send
-commands to your pipe.
+(mode 0600, inside a directory only you can enter, and the peer's uid is
+verified).
+
+On Windows it is a named pipe that rejects remote clients and that other
+standard users cannot write to. One limitation remains there: pipe names are a
+machine-wide namespace, so on a PC *shared with other people you do not
+trust*, another signed-in user could create the pipe before your service
+starts. Your service would then refuse to start, and the app would be talking
+to theirs. It cannot make your machine accept input — pairing still needs the
+code exchange with the real host — but treat Yzendris on Windows as intended
+for single-user PCs.
+
+A paired client may hand the host its clipboard only in the seconds after the
+cursor leaves it; clipboard data sent at any other moment is ignored.
 
 ## Privacy
 

@@ -387,7 +387,13 @@ fn keyboard_and_mouse_travel_from_host_to_client() {
     // ── Crossing by screen edge, on a desktop where the cursor is visible ──
     if on_desktop.is_some() {
         let push = |mouse: &mut VirtualDevice, dx: i32| {
-            mouse.emit(&[InputEvent::new(EventType::RELATIVE.0, RelativeAxisCode::REL_X.0, dx)]).unwrap();
+            mouse
+                .emit(&[InputEvent::new(
+                    EventType::RELATIVE.0,
+                    RelativeAxisCode::REL_X.0,
+                    dx,
+                )])
+                .unwrap();
             std::thread::sleep(Duration::from_millis(12));
         };
         // The client sits on the right of the host's screen: push right.
@@ -413,8 +419,14 @@ fn keyboard_and_mouse_travel_from_host_to_client() {
         std::thread::sleep(Duration::from_millis(300));
         let home = x11_cursor().unwrap();
         let screen = host.status().screens[0].rect;
-        println!("edge crossing ok; cursor returned to {home:?} on a {}×{} screen", screen.w, screen.h);
-        assert!(home.0 > screen.x + screen.w - 60 && home.0 < screen.x + screen.w, "cursor reappears just inside the edge");
+        println!(
+            "edge crossing ok; cursor returned to {home:?} on a {}×{} screen",
+            screen.w, screen.h
+        );
+        assert!(
+            home.0 > screen.x + screen.w - 60 && home.0 < screen.x + screen.w,
+            "cursor reappears just inside the edge"
+        );
     }
 
     // ── Losing the host releases whatever it was holding ───────────────────

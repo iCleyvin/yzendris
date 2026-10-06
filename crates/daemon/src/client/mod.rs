@@ -149,7 +149,8 @@ pub async fn run(app: Arc<App>) -> Result<()> {
         return Ok(());
     };
     let connector = app.identity.connector(Some(host))?;
-    let addr = with_default_port(&cfg.client.host_addr);
+    let configured = with_default_port(&cfg.client.host_addr);
+    let mut attempt = configured.clone();
     let mut backoff = Duration::from_secs(1);
     let mut failures = 0u32;
 
@@ -161,7 +162,7 @@ pub async fn run(app: Arc<App>) -> Result<()> {
         });
         let started = Instant::now();
         let result = tokio::select! {
-            r = session(&app, &connector, &addr, host, injector.as_mut()) => r,
+            r = session(&app, &connector, &attempt, host, injector.as_mut()) => r,
             _ = changes.changed() => return Ok(()),
         };
         app.live().active = None;
@@ -186,12 +187,15 @@ pub async fn run(app: Arc<App>) -> Result<()> {
             (backoff, failures) = (Duration::from_secs(1), 0);
         }
         failures += 1;
-        // The host may have moved to another address: ask the network.
+        // The host may have moved to another address: ask the network. The
+        // answer is an unauthenticated hint, so it is only *tried*; it becomes
+        // the saved address once the host there has proved its identity.
+        attempt = configured.clone();
         if failures % 3 == 0 && refused.is_none() {
             if let Some(found) = discovery::locate(&host).await {
-                if found != addr {
-                    tracing::info!("the host moved to {found}");
-                    app.update_config(|cfg| cfg.client.host_addr = found)?;
+                if found != configured {
+                    tracing::info!("trying the host at {found}");
+                    attempt = found;
                 }
             }
         }
@@ -272,6 +276,12 @@ async fn session(
         tracing::debug!("the host now calls itself differently");
     }
     tracing::info!("connected to the host");
+    // Reaching this point means the machine at `addr` holds the paired host's
+    // private key, so the address is worth remembering.
+    if with_default_port(&app.config().client.host_addr) != addr {
+        let addr = addr.to_owned();
+        app.update_config(|cfg| cfg.client.host_addr = addr)?;
+    }
 
     let mut desktop = Rect::bounding(&screens).unwrap_or_default();
     let mut pressed = Pressed::default();

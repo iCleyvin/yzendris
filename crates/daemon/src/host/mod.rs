@@ -34,6 +34,8 @@ pub const DEAD_AFTER: Duration = Duration::from_secs(7);
 /// Connections allowed in the pre-session phase at once.
 const MAX_PENDING: usize = 8;
 const SCREEN_REFRESH: Duration = Duration::from_secs(10);
+/// How long after input leaves a client its clipboard is accepted.
+const CLIPBOARD_WINDOW: Duration = Duration::from_secs(10);
 
 enum Nudge {
     /// Input just moved to this client: offer it our clipboard.
@@ -63,6 +65,9 @@ struct Core {
     /// The capture back-end holds a reference back to this struct, so it is
     /// taken out and dropped explicitly when the host stops.
     capture: Mutex<Option<Capture>>,
+    /// When input last left each client. A client may hand its clipboard to
+    /// the host only right after that, never at a moment of its choosing.
+    handoff: Mutex<HashMap<ClientId, Instant>>,
     locked: AtomicBool,
     serial: AtomicU64,
 }
@@ -109,7 +114,10 @@ impl Core {
                     capture.warp(to);
                 }
             }
-            Effect::Focus { to, .. } => {
+            Effect::Focus { from, to } => {
+                if let Some(id) = from {
+                    lock(&self.handoff).insert(id, Instant::now());
+                }
                 let name = to.and_then(|id| {
                     lock(&self.known)
                         .iter()
@@ -124,6 +132,12 @@ impl Core {
                 }
             }
         }
+    }
+
+    fn clipboard_expected_from(&self, id: ClientId) -> bool {
+        lock(&self.handoff)
+            .get(&id)
+            .is_some_and(|left| left.elapsed() < CLIPBOARD_WINDOW)
     }
 
     fn id_of(&self, fp: &Fingerprint) -> Option<ClientId> {
@@ -228,6 +242,7 @@ pub async fn run(app: Arc<App>) -> Result<()> {
         links: Mutex::new(HashMap::new()),
         known: Mutex::new(Vec::new()),
         capture: Mutex::new(None),
+        handoff: Mutex::new(HashMap::new()),
         locked: AtomicBool::new(false),
         serial: AtomicU64::new(0),
     });
@@ -391,19 +406,19 @@ where
     R: tokio::io::AsyncRead + Unpin,
     W: tokio::io::AsyncWrite + Unpin,
 {
-    let Some(code) = app.pairing_code() else {
+    let Some(code) = app.take_pairing_attempt() else {
         writer.send(&Msg::Reject(RejectReason::NotPaired)).await?;
         bail!("pairing attempt while the window is closed");
     };
-    let Msg::PairStart { spake } = timeout(HANDSHAKE, reader.expect()).await?? else {
-        bail!("expected pairing start");
-    };
     let me = app.identity.fingerprint;
-    let ok = timeout(
-        HANDSHAKE,
-        pairing::accept(reader, writer, &code, &spake, &me, &peer),
-    )
-    .await??;
+    let exchange = async {
+        let Msg::PairStart { spake } = reader.expect().await? else {
+            bail!("expected pairing start");
+        };
+        pairing::accept(reader, writer, &code, &spake, &me, &peer).await
+    };
+    // A timeout or a broken exchange counts as a failed attempt too.
+    let ok = matches!(timeout(HANDSHAKE * 2, exchange).await, Ok(Ok(true)));
     if !ok {
         app.pairing_failed();
         writer.send(&Msg::Reject(RejectReason::BadCode)).await?;
@@ -468,6 +483,25 @@ async fn session(
     if let Some(old) = lock(&core.links).insert(id, handle) {
         let _ = old.nudges.send(Nudge::Kick); // a reconnect replaces the old link
     }
+    // The client was authorized against a snapshot of the configuration taken
+    // before several awaits. Check again now that the link is registered: a
+    // removal that happened in between has either already been applied (seen
+    // here) or will find the link in the table and kick it.
+    let still_paired = core.id_of(&peer) == Some(id)
+        && app
+            .config()
+            .host
+            .clients
+            .iter()
+            .any(|c| c.fingerprint == peer && c.enabled);
+    if !still_paired {
+        let mut links = lock(&core.links);
+        if links.get(&id).is_some_and(|l| l.serial == serial) {
+            links.remove(&id);
+        }
+        tracing::warn!("a device was removed while it was connecting; dropped");
+        return;
+    }
     app.set_peer(peer, |p| {
         p.link = Link::Online;
         p.address = Some(addr.ip().to_string());
@@ -504,6 +538,14 @@ async fn session(
                         core.with(|sw| sw.client_screens(id, screens));
                     }
                     other => {
+                        let starts_transfer = matches!(other, Msg::ClipboardText(_) | Msg::FilesBegin { .. });
+                        if starts_transfer && !core.clipboard_expected_from(id) {
+                            // Unsolicited: the file frames that follow, if
+                            // any, find no open batch and are ignored too.
+                            incoming = None;
+                            tracing::debug!("ignored clipboard data a client sent unprompted");
+                            continue;
+                        }
                         if let Err(e) = receive_shared(app, &mut sync, &mut incoming, other).await {
                             tracing::warn!("dropping a client: {e:#}");
                             break;
