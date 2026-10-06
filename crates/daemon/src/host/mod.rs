@@ -38,20 +38,24 @@ const SCREEN_REFRESH: Duration = Duration::from_secs(10);
 const CLIPBOARD_WINDOW: Duration = Duration::from_secs(10);
 /// Slowest file transfer tolerated before it is abandoned (bytes per second).
 const MIN_TRANSFER_RATE: u64 = 1024 * 1024;
+/// Slack a transfer gets on top of what its received bytes have earned.
+const BATCH_GRACE_SECS: u64 = 30;
 
 /// Decides when a client may put something on the host's clipboard.
 ///
 /// The permission belongs to one session, is opened only by the host taking
 /// input away from that client, and is spent by use: one text and one batch
-/// of files per hand-off. A file batch must also finish in reasonable time,
-/// so a client cannot hold one open and complete it — changing the host's
-/// clipboard — at a moment of its choosing.
+/// of files per hand-off. A file batch must also keep moving: the time it is
+/// given grows only with the bytes that have actually arrived, never with
+/// what the client claims it will send, so a client cannot hold one open and
+/// complete it — changing the host's clipboard — at a moment of its choosing.
 #[derive(Default)]
 struct ClipGate {
     until: Option<Instant>,
     text: bool,
     files: bool,
-    batch_deadline: Option<Instant>,
+    /// When the open batch started, the size it announced and what arrived.
+    batch: Option<(Instant, u64, u64)>,
 }
 
 impl ClipGate {
@@ -70,20 +74,33 @@ impl ClipGate {
     }
 
     fn take_files(&mut self, now: Instant, count: u32, total: u64, max_bytes: u64) -> bool {
-        self.batch_deadline = None;
+        self.batch = None;
         if !self.valid(now) || !std::mem::take(&mut self.files) {
             return false;
         }
-        if total > u64::from(count).saturating_mul(max_bytes) {
+        if count == 0
+            || count > yzendris_core::proto::MAX_FILES_PER_BATCH
+            || total > u64::from(count).saturating_mul(max_bytes)
+        {
             return false;
         }
-        let allowance = Duration::from_secs(60 + total / MIN_TRANSFER_RATE);
-        self.batch_deadline = Some(now + allowance);
+        self.batch = Some((now, total, 0));
         true
     }
 
-    fn batch_alive(&self, now: Instant) -> bool {
-        self.batch_deadline.is_some_and(|deadline| now <= deadline)
+    /// Account for a frame of the open batch carrying `bytes` of file data.
+    /// Returns whether the batch may continue.
+    fn batch_progress(&mut self, now: Instant, bytes: u64) -> bool {
+        let Some((started, total, received)) = self.batch.as_mut() else {
+            return false;
+        };
+        *received = received.saturating_add(bytes);
+        let earned = Duration::from_secs(BATCH_GRACE_SECS + *received / MIN_TRANSFER_RATE);
+        let ok = *received <= *total && now.saturating_duration_since(*started) <= earned;
+        if !ok {
+            self.batch = None;
+        }
+        ok
     }
 }
 
@@ -593,8 +610,9 @@ async fn session(
                                 let max = app.config().max_file_bytes();
                                 gate.take_files(now, *count, *total, max)
                             }
-                            Msg::FileBegin { .. } | Msg::FileData(_) | Msg::FileEnd { .. } | Msg::FilesEnd => {
-                                incoming.is_some() && gate.batch_alive(now)
+                            Msg::FileData(chunk) => incoming.is_some() && gate.batch_progress(now, chunk.len() as u64),
+                            Msg::FileBegin { .. } | Msg::FileEnd { .. } | Msg::FilesEnd => {
+                                incoming.is_some() && gate.batch_progress(now, 0)
                             }
                             _ => true,
                         };
@@ -730,7 +748,7 @@ mod tests {
         let mut gate = ClipGate::default();
         assert!(!gate.take_text(now));
         assert!(!gate.take_files(now, 1, 10, MB));
-        assert!(!gate.batch_alive(now));
+        assert!(!gate.batch_progress(now, 0));
     }
 
     #[test]
@@ -743,7 +761,7 @@ mod tests {
         assert!(gate.take_files(now, 2, MB, MB));
         assert!(!gate.take_files(now, 2, MB, MB));
         assert!(
-            !gate.batch_alive(now),
+            !gate.batch_progress(now, 0),
             "a refused batch leaves nothing open"
         );
     }
@@ -761,13 +779,45 @@ mod tests {
     #[test]
     fn a_batch_cannot_be_held_open() {
         let now = Instant::now();
+        let secs = Duration::from_secs;
         let mut gate = ClipGate::default();
         gate.open(now);
-        assert!(gate.take_files(now, 1, 100 * MB, 500 * MB));
-        assert!(gate.batch_alive(now + Duration::from_secs(150)));
-        assert!(!gate.batch_alive(now + Duration::from_secs(161)));
-        // A batch claiming more than the limits allow is refused outright.
+        // Announcing a huge transfer buys no time by itself…
+        assert!(gate.take_files(now, 512, 512 * 500 * MB, 500 * MB));
+        assert!(gate.batch_progress(now + secs(BATCH_GRACE_SECS), 0));
+        assert!(
+            !gate.batch_progress(now + secs(BATCH_GRACE_SECS + 1), 0),
+            "stalled"
+        );
+        assert!(
+            !gate.batch_progress(now, 0),
+            "and a dropped batch stays dropped"
+        );
+
+        // …only bytes that actually arrive do.
         gate.open(now);
-        assert!(!gate.take_files(now, 1, 501 * MB, 500 * MB));
+        assert!(gate.take_files(now, 1, 100 * MB, 500 * MB));
+        assert!(gate.batch_progress(now + secs(20), 50 * MB));
+        assert!(gate.batch_progress(now + secs(BATCH_GRACE_SECS + 50), 0));
+        assert!(!gate.batch_progress(now + secs(BATCH_GRACE_SECS + 51), 0));
+    }
+
+    #[test]
+    fn a_batch_must_stay_within_what_it_announced() {
+        let now = Instant::now();
+        let mut gate = ClipGate::default();
+        gate.open(now);
+        assert!(
+            !gate.take_files(now, 1, 501 * MB, 500 * MB),
+            "over the size limit"
+        );
+        gate.open(now);
+        assert!(!gate.take_files(now, 0, 0, MB));
+        gate.open(now);
+        assert!(!gate.take_files(now, 100_000, MB, MB), "too many files");
+        gate.open(now);
+        assert!(gate.take_files(now, 1, 10, MB));
+        assert!(gate.batch_progress(now, 10));
+        assert!(!gate.batch_progress(now, 1), "more data than announced");
     }
 }
