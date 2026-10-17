@@ -1,29 +1,23 @@
 [package]
-name    = "yzendris-gui"
-version = "0.1.0"
-edition = "2021"
+name        = "yzendris-gui"
+description = "Graphical control panel for Yzendris"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
 
 [dependencies]
-eframe     = { version = "0.34", default-features = false, features = [
-    "glow",          # OpenGL backend (avoids the heavier wgpu stack)
-    "default_fonts",
-    "wayland",       # Linux: Hyprland/Wayland
-    "x11",           # Linux: XWayland fallback
-] }
-serde      = { workspace = true }
-toml       = { workspace = true }
+yzendris-core = { workspace = true }
 anyhow     = { workspace = true }
+serde      = { workspace = true }
+serde_json = { workspace = true }
+eframe = { version = "0.36", default-features = false, features = ["glow", "wayland", "x11"] }
+image  = { version = "0.25", default-features = false, features = ["png"] }
+sys-locale = "0.3"
+toml = { workspace = true }
 
-# Reading the client cert fingerprint — needed on both Linux and Windows now
-# that the client runs on either OS.
-sha2           = "0.10"
-rustls-pemfile = "2"
-
-[target.'cfg(windows)'.build-dependencies]
+[build-dependencies]
 winresource = "0.1"
-
-[target.'cfg(windows)'.dependencies]
-windows = { version = "0.58", features = [
-    "Win32_Foundation",
-    "Win32_Graphics_Gdi",
-] }

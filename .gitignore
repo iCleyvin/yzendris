@@ -1,10 +1,6 @@
-# Rust build artifacts
 /target/
-
-# Backup / editor files
 *.swp
 *~
-
-# Local TLS material and runtime state (should live in the user config dir,
-# never in the repo)
+# Identity and settings live in the user's config directory, never in the repo.
 *.pem
+/dist/
